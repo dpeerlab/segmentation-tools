@@ -39,6 +39,7 @@ def is_tiff_file(file_path: str | Path) -> bool:
             return True
     except:
         return False
+    
 
 
 def convert_to_tiff(input_path: str | Path, output_root: str | Path) -> Path:
