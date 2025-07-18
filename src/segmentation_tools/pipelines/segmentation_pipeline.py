@@ -8,6 +8,7 @@ from segmentation_tools.logger import logger
 import segmentation_tools.utils as utils
 from skimage.exposure import rescale_intensity
 from cellpose import models, core, io, plot
+import torch
 
 class SegmentationPipeline(BaseModel):
     output_dir: Path = Field(..., description="Path to store outputs")
@@ -21,14 +22,22 @@ class SegmentationPipeline(BaseModel):
         self._if_dapi_img_aligned = self._intermediates_dir / "if_dapi_aligned.npy"
         return
 
+    def _is_gpu_availble(self):
+        return torch.cuda.is_available()
+            
+
     def _run_cellpose(self):
         """
         Run Cellpose segmentation on the aligned IF DAPI image.
         """
         logger.info("Running Cellpose segmentation")
 
-        gpu_available = utils.is_gpu_available()
-        model = models.CellposeModel(gpu=gpu_available)
+        if not self._is_gpu_availble():
+            raise RuntimeError("No GPU detected. Cellpose will run on CPU, which may be slow.")
+
+        logger.info(f"PyTorch detected GPU: {torch.cuda.get_device_name(0)}")
+
+        model = models.CellposeModel(gpu=True)
         masks, _, _ = model.eval(
             self._if_dapi_img_aligned,
             diameter=None,
