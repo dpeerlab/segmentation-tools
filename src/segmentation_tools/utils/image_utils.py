@@ -2,31 +2,53 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
-import cv2
-from skimage import img_as_uint
+
+import skimage
 import tifffile
 import numpy as np
 from segmentation_tools.logger import logger
+from numpy.typing import ArrayLike
+from skimage.transform import (
+    ProjectiveTransform, AffineTransform, EuclideanTransform
+)
+
+def get_level_transform(
+    tiff_object: os.PathLike,
+    level_to: int,
+    level_from: int = 0,
+):
+    lvl = tiff_object.series[0].levels[level_from]
+    from_dims = dict(zip(lvl.axes, lvl.shape))
+    lvl = tiff_object.series[0].levels[level_to]
+    to_dims = dict(zip(lvl.axes, lvl.shape))
+    scale = to_dims['X'] / from_dims['X'], to_dims['Y'] / from_dims['Y']
+    return AffineTransform(scale=scale)
 
 
-def normalize_image(img: np.ndarray) -> np.ndarray:
-    logger.info("Starting normalization: quantile clipping and CLAHE")
+def normalize(
+    img: np.ndarray,
+    quantiles: ArrayLike = [0.01, 0.99],
+    values: ArrayLike = None,
+):
+    # Clip values
+    if values is None:
+        # Clip to quantile
+        qtl = np.quantile(img, quantiles, axis=(-2, -1))
+        qtl = qtl.reshape((*qtl.shape, 1, 1))
+        img = np.clip(img, a_min=qtl[0], a_max=qtl[1])
 
-    # 1. Clip extreme values (remove top 0.01% brightest pixels)
-    low, high = np.quantile(img, [0, 0.9999])
-    logger.debug(f"Clipping range: {low:.2f} to {high:.2f}")
-    img_clipped = np.clip(img, low, high)
-
-    # 2. Convert to uint16 for OpenCV CLAHE
-    img_uint16 = img_as_uint(img_clipped / high)  # normalize to [0, 1] first
-
-    # 3. Apply CLAHE (local histogram equalization)
-    clahe = cv2.createCLAHE(clipLimit=1.0, tileGridSize=(20, 20))
-    img_eq = clahe.apply(img_uint16)
-
-    logger.success("Normalization complete")
-    return img_eq
-
+    else:
+        # Clip to provided values
+        img = np.clip(img, a_min=values[0], a_max=values[1])
+    
+    # Rescale
+    mins = img.min(axis=(-2, -1))
+    mins = mins.reshape((*mins.shape, 1, 1))
+    maxs = img.max(axis=(-2, -1))
+    maxs = maxs.reshape((*maxs.shape, 1, 1))
+    img = (img - mins) / (maxs - mins)
+    # Convert to [0, 255]
+    return skimage.util.img_as_ubyte(img)
 
 def is_tiff_file(file_path: str | Path) -> bool:
     """Check if a file is a valid TIFF."""
@@ -40,7 +62,6 @@ def is_tiff_file(file_path: str | Path) -> bool:
     except:
         return False
     
-
 
 def convert_to_tiff(input_path: str | Path, output_root: str | Path) -> Path:
     """Convert a single file or directory of files to TIFF format."""

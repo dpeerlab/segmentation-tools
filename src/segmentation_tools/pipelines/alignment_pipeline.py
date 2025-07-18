@@ -8,9 +8,7 @@ import imageio.v3 as iio
 from skimage.metrics import structural_similarity as ssim
 from skimage.transform import warp
 from skimage import img_as_uint
-import cellpose
-
-LEVEL = 7
+from skimage.exposure import rescale_intensity
 
 class AlignmentPipeline(BaseModel):
     if_file: Path = Field(..., description="Path to the input IF image")
@@ -26,11 +24,16 @@ class AlignmentPipeline(BaseModel):
     _xenium_dapi_img: np.ndarray = PrivateAttr()
 
     _if_dapi_img_aligned: np.ndarray = PrivateAttr()
+    _resolution_level: int = PrivateAttr()
 
     def model_post_init(self, __context) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self._intermediates_dir = self.output_dir / "intermediates"
+        self._intermediates_dir = self.output_dir / f"intermediates"
         self._intermediates_dir.mkdir(parents=True, exist_ok=True)
+
+        self._setup_dirs()
+        (self.output_dir / ".alignment_done").unlink(missing_ok = True)
+
 
     @validator("if_file")
     def check_if_file_exists(cls, v: Path):
@@ -59,10 +62,6 @@ class AlignmentPipeline(BaseModel):
             except Exception:
                 pass
 
-    def __post_init_post_parse__(self):
-        self._setup_dirs()
-        (self.output_dir / ".alignment_done").unlink(missing_ok = True)
-
     def _setup_dirs(self):
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self._intermediates_dir = self.output_dir / "intermediates"
@@ -80,6 +79,18 @@ class AlignmentPipeline(BaseModel):
             self.if_file = self._intermediates_dir / f"{self.if_file.stem}.tiff"
         else:
             logger.info(f"Input file is already a TIFF: {self.if_file}")
+        return
+
+    def _find_best_level(self):
+        levels = self._if_dapi_tiff.series[0].levels  # list of TiffPageSeries
+        best_level = 0  # start with highest resolution by default
+        for i in reversed(range(len(levels))):  # start from lowest resolution
+            shape = levels[i].shape
+            if shape[-2] > 1024 and shape[-1] > 1024:
+                best_level = i
+                break
+        return best_level
+
 
     def _load_tiff_objects(self):
         try:
@@ -87,6 +98,9 @@ class AlignmentPipeline(BaseModel):
             logger.info(f"Loaded IF TIFF file: {self.if_file}")
         except:
             raise FileNotFoundError(f"Failed to load IF TIFF file: {self.if_file}")
+        
+        self._resolution_level = self._find_best_level()
+        logger.info(f"Using level {self._resolution_level} for alignment")
 
         xenium_dapi_path = self.xenium_dir / "morphology.ome.tif"
         if not xenium_dapi_path.exists():
@@ -101,22 +115,23 @@ class AlignmentPipeline(BaseModel):
             raise FileNotFoundError(
                 f"Failed to load Xenium DAPI TIFF file: {xenium_dapi_path}"
             )
-
-        self._if_dapi_img = utils.normalize_image(
+    
+        self._if_dapi_img = utils.normalize(
             self._if_dapi_tiff.series[0]
-            .levels[LEVEL]
+            .levels[self._resolution_level]
             .asarray()[self.dapi_channel, :, :]
         )
         logger.info("Normalized IF DAPI image")
+
 
         output_path = self._intermediates_dir / "normalized_if_dapi.png"
         iio.imwrite(
             output_path, self._if_dapi_img
         )
 
-        self._xenium_dapi_img = utils.normalize_image(
+        self._xenium_dapi_img = utils.normalize(
             self._xenium_dapi_tiff.series[0]
-            .levels[LEVEL]
+            .levels[self._resolution_level]
             .asarray()[self.dapi_channel, :, :]
         )
 
@@ -128,38 +143,62 @@ class AlignmentPipeline(BaseModel):
         
         return
     
-    def _find_best_alignment(self):
+    def _get_transformation_matrix(self):
         """
         Find the best alignment between IF and Xenium DAPI images using SIFT.
         Returns the aligned image, transform name, and score.
         """
-        logger.info("Finding best alignment between IF and Xenium DAPI images")
-        best_result, best_transform_name, best_score = utils.find_best_alignment(
+        logger.info("Finding best SIFT between downsampled IF and Xenium DAPI images")
+        tm_sift_if_to_xenium = utils.find_best_sift(
             mvg_img=self._if_dapi_img,
             fxd_img=self._xenium_dapi_img
         )
-        logger.info(f"Best alignment found: {best_transform_name} with score {best_score}")
 
-        self._if_dapi_img_aligned = best_result
-        image = self._if_dapi_img_aligned
-        image = (image - image.min()) / (image.max() - image.min() + 1e-8)  # Normalize to [0, 1]
-        image_uint = img_as_uint(image)
-        output_path = self._intermediates_dir / "if_dapi_aligned.png"
-        iio.imwrite(
-            output_path, image_uint
+        if_level_tm_ds = utils.get_level_transform(
+            tiff_object = self._if_dapi_tiff, level_to = self._resolution_level
         )
-        logger.info(f"Saved aligned IF DAPI png image to {output_path}")
-        
-        output_path = self._intermediates_dir / "if_dapi_aligned.npy"
-        np.save(output_path, self._if_dapi_img_aligned)
-        return
+
+        xenium_level_tm_ds = utils.get_level_transform(
+            tiff_object = self._xenium_dapi_tiff, level_to = self._resolution_level
+        )
+
+        tm_xenium_to_if = (
+            xenium_level_tm_ds + \
+            tm_sift_if_to_xenium.inverse + \
+            if_level_tm_ds.inverse
+        )
+
+        return tm_xenium_to_if
     
 ### RUN FUNCTIONS ###
-
 
     def run(self):
         logger.info("Starting segmentation pipeline")
         self._convert_if_needed()
         self._load_tiff_objects()
-        self._find_best_alignment()
+
+        tm_xenium_to_if = self._get_transformation_matrix()
+        self._if_dapi_img_aligned = warp(
+            self._if_dapi_img,
+            inverse_map=tm_xenium_to_if.inverse,
+            output_shape=self._xenium_dapi_img.shape,
+            preserve_range=True,
+        )
+
+        
+        rescaled = rescale_intensity(self._if_dapi_img_aligned, in_range='image', out_range=(0, 1))
+        output_path = self.output_dir / "if_dapi_aligned.tiff"
+        iio.imwrite(output_path, rescaled)
+        logger.success(f"Aligned IF DAPI image saved to {output_path}")
+
+        # Save as NPY
+        npy_path = self.output_dir / "if_dapi_aligned.npy"
+        np.save(npy_path, rescaled)
+        logger.success(f"Aligned IF DAPI image also saved as NPY to {npy_path}")
+
+        # Normalize and save as PNG
+        img_png = rescale_intensity(self._if_dapi_img_aligned, out_range=(0, 255)).astype(np.uint8)
+        png_path = self.output_dir / "if_dapi_aligned.png"
+        iio.imwrite(png_path, img_png)
+        logger.success(f"Aligned IF DAPI image also saved as PNG to {png_path}")
         (self.output_dir / ".alignment_done").touch()
