@@ -46,8 +46,10 @@ OUTPUT_ROOT="$2"
 mkdir -p "$OUTPUT_ROOT"
 
 if [[ -f "$INPUT" ]]; then
+    parent_dir="$(basename "$(dirname "$INPUT")")"
     base_name="$(basename "$INPUT")"
-    output_path="${OUTPUT_ROOT}/${base_name%.*}.tiff"
+    base_no_ext="${base_name%.*}"  # strips final extension
+    output_path="${OUTPUT_ROOT}/${parent_dir}_${base_no_ext}.tiff"
     convert_file "$INPUT" "$output_path"
 elif [[ -d "$INPUT" ]]; then
     find "$INPUT" -type f | while read -r file; do

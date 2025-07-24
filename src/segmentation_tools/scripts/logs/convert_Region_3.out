@@ -1,0 +1,5 @@
+Processing: /data1/peerd/ghoshr/segmentation_tools/data/sam_data/if/nd2_files/20250208_NP_TT_XeniumRun_5_NaKCD45AF555/0032783/Region_3.nd2
+Processing: /data1/peerd/ghoshr/segmentation_tools/data/sam_data/if/nd2_files/20250430_NP_TT_XeniumRun_4_NakCD45AF555/0033151/Region_3.nd2
+2025-07-22 11:29:20,068 [main] WARN  c.g.bioformats2raw.Converter - Overwriting output path /tmp/tmp.Q2IrqthNGv
+2025-07-22 11:29:20,068 [main] WARN  c.g.bioformats2raw.Converter - Overwriting output path /tmp/tmp.zTPAv0lDVM
+Saved: /data1/peerd/ghoshr/alignment/if_tif_files/Region_3.tiff

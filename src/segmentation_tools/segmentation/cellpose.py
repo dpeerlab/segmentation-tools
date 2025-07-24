@@ -1,4 +1,4 @@
-from cellpose import models
+# from cellpose import models
 
 
 def run_cellpose(image):
