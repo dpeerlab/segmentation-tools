@@ -1,20 +1,24 @@
-from skimage.transform import AffineTransform, ProjectiveTransform
-from typing import List
-import geopandas as gpd
+import os
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+
+import cv2
+import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import scanpy as sc
 import scipy as sp
-import numpy as np
-import cv2
-from segmentation_tools.logger import logger
 import tifffile
-from pathlib import Path
-
+from icecream import ic
+from shapely.geometry import box
+from shapely.ops import unary_union
 from skimage import img_as_ubyte
+from skimage.measure import label, regionprops
 from skimage.metrics import structural_similarity as ssim
-from skimage.transform import warp
+from skimage.transform import AffineTransform, ProjectiveTransform, warp
 
-from concurrent.futures import ProcessPoolExecutor
+from segmentation_tools.logger import logger
 
 
 def get_best_common_level(
@@ -76,6 +80,7 @@ def get_SIFT_homography(
     img_mvg,  # Image to transform
     min_match_count: int = 10,
     save_img_path=None,
+    draw_matches=False,
 ):
     FLANN_INDEX_KDTREE = 1
 
@@ -92,16 +97,31 @@ def get_SIFT_homography(
     good_matches = list(filter(lambda m: m[0].distance < 0.7 * m[1].distance, matches))
 
     if save_img_path is not None:
-        img_matches = cv2.drawMatchesKnn(
-            img_fxd,
-            kp_fxd,
-            img_mvg,
-            kp_mvg,
-            good_matches,
-            None,
-            flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
-        )
-        cv2.imwrite(save_img_path, img_matches)
+        if draw_matches:
+            img_matches = cv2.drawMatchesKnn(
+                img_fxd,
+                kp_fxd,
+                img_mvg,
+                kp_mvg,
+                good_matches,
+                None,
+                flags=cv2.DrawMatchesFlags_DRAW_RICH_KEYPOINTS,
+            )
+            cv2.imwrite(save_img_path, img_matches)
+            logger.info(f"Saved SIFT matches to {save_img_path}")
+        else:
+            img_mvg_resized = cv2.resize(img_mvg, (img_fxd.shape[1], img_fxd.shape[0]))
+            img_combined = np.hstack([img_fxd, img_mvg_resized])
+
+            # Save using matplotlib
+            plt.figure(figsize=(10, 5))
+            plt.imshow(img_combined, cmap="gray")
+            plt.axis("off")
+            plt.tight_layout(pad=0)
+            plt.savefig(save_img_path, bbox_inches="tight", pad_inches=0)
+            plt.close()
+
+            logger.info(f"Saved side-by-side image (no matches) to {save_img_path}")
 
     # Compute 3x3 homography matrix
     if len(good_matches) >= min_match_count:
@@ -144,14 +164,19 @@ def _generate_img_variants(image: np.ndarray):
     return variants
 
 
-def _score_variant(variant_img, name, pre_matrix, fxd_img, save_img_path):
+def _score_variant(
+    variant_img, name, pre_matrix, fxd_img, save_img_dir=None, draw_matches=False
+):
     try:
         fxd_img = img_as_ubyte(fxd_img)
         variant_img = img_as_ubyte(variant_img)
 
-        save_path = f"{save_img_path}_{name}.png" if save_img_path else None
+        save_path = f"{os.path.join(save_img_dir, name)}.png" if save_img_dir else None
         H = get_SIFT_homography(
-            img_fxd=fxd_img, img_mvg=variant_img, save_img_path=save_path
+            img_fxd=fxd_img,
+            img_mvg=variant_img,
+            save_img_path=save_path,
+            draw_matches=draw_matches,
         )
 
         aligned = warp(
@@ -167,10 +192,11 @@ def _score_variant(variant_img, name, pre_matrix, fxd_img, save_img_path):
         return (score, name, combined_matrix)
 
     except Exception as e:
+        logger.warning(f"Failed to score variant {name}: {e}")
         return (-1, name, None)  # Failed variant
 
 
-def find_best_sift(mvg_img, fxd_img, save_img_path=None):
+def find_best_sift(mvg_img, fxd_img, save_img_dir=None, draw_matches=False):
     mvg_img = img_as_ubyte(mvg_img)
     fxd_img = img_as_ubyte(fxd_img)
 
@@ -179,7 +205,13 @@ def find_best_sift(mvg_img, fxd_img, save_img_path=None):
     with ProcessPoolExecutor() as executor:
         futures = [
             executor.submit(
-                _score_variant, variant_img, name, pre_matrix, fxd_img, save_img_path
+                _score_variant,
+                variant_img,
+                name,
+                pre_matrix,
+                fxd_img,
+                save_img_dir,
+                draw_matches,
             )
             for variant_img, name, pre_matrix in variants
         ]
@@ -194,4 +226,85 @@ def find_best_sift(mvg_img, fxd_img, save_img_path=None):
         raise RuntimeError("All variant alignments failed.")
 
     logger.info(f"Best alignment found: {best_name} with score {best_score:.4f}")
-    return ProjectiveTransform(matrix=best_matrix)
+    return ProjectiveTransform(matrix=np.linalg.inv(best_matrix))
+
+
+def find_poorly_aligned_regions(
+    img1,
+    img2,
+    ssim_bounds=(0.0, 0.6),
+    win_size=11,
+    min_brightness_factor=0.15,
+    min_area_factor=5e-5,
+    output_file_path=None,
+):
+
+    _, ssim_full = ssim(
+        img1, img2, data_range=img1.max() - img2.min(), full=True, win_size=win_size
+    )
+    min_brightness = min(img1.max(), img2.max()) * min_brightness_factor
+
+    masked = np.where(
+        (ssim_full >= ssim_bounds[0]) & (ssim_full <= ssim_bounds[1]), 1, 0
+    ).astype(np.uint8)
+
+    # Only keep values where both warped_if_ds and xenium_dapi_ds >= 50
+    condition = (img1 >= min_brightness) | (img2 >= min_brightness)
+
+    # Set masked = 1 only where it was already 1 and condition is met
+    masked_conditioned = masked & condition
+
+    # Generate labeled regions
+    labeled_mask = label(masked_conditioned, connectivity=2)
+    regions = regionprops(labeled_mask)
+
+    min_area_threshold = (
+        min_area_factor * masked_conditioned.shape[0] * masked_conditioned.shape[1]
+    )
+    filtered_regions = [r for r in regions if r.area >= min_area_threshold]
+
+    # Step 1: Convert bounding boxes to shapely rectangles
+    bounding_boxes = []
+    for r in filtered_regions:
+        minr, minc, maxr, maxc = r.bbox
+        bounding_boxes.append(box(minc, minr, maxc, maxr))  # note x/y reversal
+
+    # Step 2: Merge overlapping or touching boxes using shapely
+    buffer_distance = min_area_threshold / 5
+
+    # Expand each box by 100 pixels
+    expanded_boxes = [b.buffer(buffer_distance) for b in bounding_boxes]
+
+    # Merge overlapping/touching buffered boxes
+    merged = unary_union(expanded_boxes)
+
+    # Optional: shrink boxes back to original size (i.e., remove the buffer)
+    if merged.geom_type == "Polygon":
+        merged_boxes = [merged.buffer(-buffer_distance)]
+    else:
+        merged_boxes = [g.buffer(-buffer_distance) for g in merged.geoms]
+
+    # Step 4: Plot merged boxes
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax.imshow(masked_conditioned, cmap="gray")
+
+    for poly in merged_boxes:
+        minx, miny, maxx, maxy = poly.bounds
+        rect = mpatches.Rectangle(
+            (minx, miny),
+            maxx - minx,
+            maxy - miny,
+            fill=False,
+            edgecolor="lime",
+            linewidth=2,
+        )
+        ax.add_patch(rect)
+
+    ax.set_title("Merged Bounding Boxes")
+    plt.axis("off")
+
+    if output_file_path:
+        fig.savefig(output_file_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+        logger.info(f"Poorly aligned regions saved to: {output_file_path}")
+    return merged_boxes

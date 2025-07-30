@@ -2,7 +2,9 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
+
 import tifffile
+
 from segmentation_tools.logger import logger
 
 

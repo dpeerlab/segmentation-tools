@@ -1,16 +1,15 @@
 from pathlib import Path
-from pydantic import BaseModel, Field, PrivateAttr
-import tifffile
-import numpy as np
+
 import imageio.v3 as iio
+import numpy as np
+import tifffile
+# from cellpose import models, core, io, plot
+import torch
+from pydantic import BaseModel, Field, PrivateAttr
+from skimage.exposure import rescale_intensity
 
 # import cellpose
 from segmentation_tools.logger import logger
-import segmentation_tools.utils as utils
-from skimage.exposure import rescale_intensity
-
-# from cellpose import models, core, io, plot
-import torch
 
 
 class SegmentationPipeline(BaseModel):

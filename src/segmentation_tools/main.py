@@ -1,11 +1,17 @@
-from argparse import ArgumentParser
-from segmentation_tools.pipelines import AlignmentPipeline, SegmentationPipeline
 import sys
+from argparse import ArgumentParser
+from icecream import install
+
+from segmentation_tools.pipelines import (AlignmentPipeline,
+                                          SegmentationPipeline)
 
 
 def main():
+    # Install icecream for debugging
+    install()
+    # Set up argument parser
     parser = ArgumentParser(description="Segmentation CLI")
-    subparsers = parser.add_subparsers(dest="command")  # no required=True
+    subparsers = parser.add_subparsers(dest="command")
 
     # align
     p_align = subparsers.add_parser("align")
@@ -14,18 +20,13 @@ def main():
     p_align.add_argument("--xenium_dir", required=True)
     p_align.add_argument("--output_dir")
     p_align.add_argument("--nuclei_channel_if", type=int, default=1)
-    p_align.add_argument("--membrane_channel_if", type=int, default=0)
-
-    # segment
-    # p_segment = subparsers.add_parser("segment")
-    # p_segment.add_argument("--output_dir")
-
-    # both
-    # p_both = subparsers.add_parser("run")
-    # p_both.add_argument("--if_file", required=True)
-    # p_both.add_argument("--xenium_dir", required=True)
-    # p_both.add_argument("--output_dir", default="output")
-    # p_both.add_argument("--nuclei_channel_if", type=int, default=1)
+    p_align.add_argument("--membrane_channel_if", type=int, default=0) 
+    p_align.add_argument(
+        "--high_res_level",
+        type=int,
+        default=0,
+        help="Resolution level to use for high-res alignment (default: 0)",
+    )
 
     if len(sys.argv) <= 1 or sys.argv[1] not in ("align", "segment", "run"):
         # inject "run" as default
