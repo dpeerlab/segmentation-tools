@@ -1,9 +1,11 @@
-from pathlib import Path
-import tempfile
-import subprocess
-from segmentation_tools.logger import logger
-import tifffile
 import os
+import subprocess
+import tempfile
+from pathlib import Path
+
+import tifffile
+
+from segmentation_tools.logger import logger
 
 
 def is_tiff_file(file_path: str | Path) -> bool:

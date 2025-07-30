@@ -1,4 +1,5 @@
 import sys
+
 from loguru import logger
 
 # Optional: configure sink, formatting, level

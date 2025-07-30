@@ -1,5 +1,5 @@
-from .segmentation_pipeline import SegmentationPipeline
 from .alignment_pipeline import AlignmentPipeline
+from .segmentation_pipeline import SegmentationPipeline
 
 all = [
     "AlignmentPipeline",
