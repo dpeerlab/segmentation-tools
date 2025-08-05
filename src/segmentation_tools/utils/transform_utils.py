@@ -1,7 +1,7 @@
 from pathlib import Path
 import os
 import tifffile
-from skimage.transform import AffineTransform
+from skimage.transform import AffineTransform, warp
 from shapely.geometry import MultiPolygon, Polygon
 from shapely.ops import transform as shapely_transform
 from skimage.transform import ProjectiveTransform

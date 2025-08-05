@@ -135,7 +135,6 @@ def save_good_region_control_overlay(
     image_moving: np.ndarray,
     boxes: list,  # List of poorly aligned polygons
     output_file_path: str,
-    title: str | None = None,
     max_attempts: int = 100,
     ssim_threshold: float = 0.8,
     max_width: int = 500,
@@ -398,45 +397,46 @@ def match_image_histograms_local(img1, img2, tile_fraction=0.1, max_workers=8):
 
     return out1, out2
 
-def save_pyramidal_tiff_two_channel(
-    img1: np.ndarray,
-    img2: np.ndarray,
+def save_pyramidal_tiff_from_high_res(
+    image: np.ndarray,
     output_file_path: Path,
     n_levels: int,
     downscale_factor: int = 2,
     description: str = "",
 ):
-    assert img1.shape == img2.shape, "Images must be the same shape"
-    h, w = img1.shape
-
     # Normalize to [0, 1] if needed
-    img1 = img1.astype(np.float32)
-    img2 = img2.astype(np.float32)
-    if img1.max() > 1:
-        img1 /= img1.max()
-    if img2.max() > 1:
-        img2 /= img2.max()
+    image = image.astype(np.float32)
+    if image.max() > 1:
+        image /= image.max()
 
-    # Build pyramid: list of (2, H, W) arrays
+    image = np.clip(image, 0, 1)
+
+    # Build pyramid using iterative downsampling
     pyramid = []
-    for i in range(n_levels):
-        scale = downscale_factor ** i
-        new_shape = (max(1, h // scale), max(1, w // scale))
+    current = image
+    for _ in range(n_levels):
+        current_uint8 = img_as_ubyte(current)
+        pyramid.append(current_uint8)
 
-        img1_resized = resize(img1, new_shape, preserve_range=True, anti_aliasing=True)
-        img2_resized = resize(img2, new_shape, preserve_range=True, anti_aliasing=True)
-
-        stacked = np.stack(
-            [img_as_uint(img1_resized), img_as_uint(img2_resized)], axis=0  # shape: (2, H, W)
+        new_shape = (
+            max(1, current.shape[0] // downscale_factor),
+            max(1, current.shape[1] // downscale_factor),
         )
-        pyramid.append(stacked)
+
+        current = resize(
+            current,
+            new_shape,
+            preserve_range=True,
+            anti_aliasing=True,
+        )
+        current = np.clip(current, 0, 1)
 
     # Write TIFF with subIFDs
     with tifffile.TiffWriter(output_file_path, bigtiff=True) as tif:
         tif.write(
             data=pyramid[0],
             photometric="minisblack",
-            planarconfig="separate",
+            planarconfig="contig",
             subifds=len(pyramid) - 1,
             metadata=None,
         )
@@ -444,9 +444,9 @@ def save_pyramidal_tiff_two_channel(
             tif.write(
                 data=level,
                 photometric="minisblack",
-                planarconfig="separate",  # Must match base IFD
+                planarconfig="contig",
                 metadata=None,
             )
 
-    logger.info(f"{description} Two-channel pyramidal TIFF saved to: {output_file_path}")
+    logger.info(f"{description} pyramidal TIFF saved to: {output_file_path}")
     return output_file_path
