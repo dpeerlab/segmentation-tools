@@ -47,6 +47,9 @@ def get_best_common_level(
     level1 = find_max_valid_level(levels1, min_size)
     level2 = find_max_valid_level(levels2, min_size)
 
+    level1 = min(level1, level2)
+    level2 = level1
+
     return level1, level2
 
 
@@ -230,8 +233,8 @@ def find_best_sift(mvg_img, fxd_img, save_img_dir=None, draw_matches=False):
 
 
 def find_poorly_aligned_regions(
-    img1,
-    img2,
+    fixed_img,
+    moving_img,
     ssim_bounds=(0.0, 0.6),
     win_size=11,
     min_brightness_factor=0.15,
@@ -240,16 +243,16 @@ def find_poorly_aligned_regions(
 ):
 
     _, ssim_full = ssim(
-        img1, img2, data_range=img1.max() - img2.min(), full=True, win_size=win_size
+        fixed_img, moving_img, data_range=fixed_img.max() - moving_img.min(), full=True, win_size=win_size
     )
-    min_brightness = min(img1.max(), img2.max()) * min_brightness_factor
+    min_brightness = min(fixed_img.max(), moving_img.max()) * min_brightness_factor
 
     masked = np.where(
         (ssim_full >= ssim_bounds[0]) & (ssim_full <= ssim_bounds[1]), 1, 0
     ).astype(np.uint8)
 
     # Only keep values where both warped_if_ds and xenium_dapi_ds >= 50
-    condition = (img1 >= min_brightness) | (img2 >= min_brightness)
+    condition = (fixed_img >= min_brightness) | (moving_img >= min_brightness)
 
     # Set masked = 1 only where it was already 1 and condition is met
     masked_conditioned = masked & condition
