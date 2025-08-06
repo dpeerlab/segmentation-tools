@@ -225,3 +225,10 @@ def find_best_sift(mvg_img, fxd_img, save_img_dir=None, draw_matches=False):
     return ProjectiveTransform(matrix=np.linalg.inv(best_matrix))
 
 
+def determine_alignment_levels(moving_file, fixed_file, min_size=1500):
+    """Determine appropriate downsampled levels for alignment."""
+    return get_best_common_level(
+        img1_path=moving_file,
+        img2_path=fixed_file,
+        min_size=min_size,
+    )

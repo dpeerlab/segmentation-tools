@@ -1,5 +1,4 @@
-from ctypes import resize
-import json
+from pprint import pprint
 from pathlib import Path
 
 import cv2
@@ -18,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from segmentation_tools.logger import logger
 
+
 def normalize(
     img: np.ndarray,
     quantiles: ArrayLike = [0.001, 0.999],
@@ -32,7 +32,13 @@ def normalize(
     if img.ndim == 3 and img.shape[-1] == 3:
         # Normalize each channel separately, no CLAHE
         norm_channels = [
-            normalize(img[..., c], quantiles, clahe_clip_limit, clahe_tile_grid_size, return_float)
+            normalize(
+                img[..., c],
+                quantiles,
+                clahe_clip_limit,
+                clahe_tile_grid_size,
+                return_float,
+            )
             for c in range(3)
         ]
         return np.stack(norm_channels, axis=-1)
@@ -67,21 +73,22 @@ def normalize(
 def create_rgb_overlay(fixed, moving):
     fixed = fixed.astype(np.float32)
     moving = moving.astype(np.float32)
-    
+
     # Normalize to [0,1] range
     if fixed.max() > 0:
         fixed /= fixed.max()
     if moving.max() > 0:
         moving /= moving.max()
-    
+
     # Create RGB without perceptual scaling
     rgb = np.zeros((*fixed.shape, 3), dtype=np.float32)
-    rgb[..., 0] = fixed      # R
-    rgb[..., 1] = moving     # G  
-    rgb[..., 2] = moving     # B
+    rgb[..., 0] = fixed  # R
+    rgb[..., 1] = moving  # G
+    rgb[..., 2] = moving  # B
 
     rgb = np.clip(rgb, 0, 1)  # Ensure values are in [0, 1]
     return rgb
+
 
 def save_full_overlay(
     image_fixed: np.ndarray,
@@ -166,7 +173,10 @@ def save_good_region_control_overlay(
         crop_fixed = image_fixed[miny:maxy, minx:maxx]
         crop_moving = image_moving[miny:maxy, minx:maxx]
 
-        if crop_fixed[crop_fixed > 0].mean() < fixed_thresh or crop_moving[crop_moving > 0].mean() < moving_thresh:
+        if (
+            crop_fixed[crop_fixed > 0].mean() < fixed_thresh
+            or crop_moving[crop_moving > 0].mean() < moving_thresh
+        ):
             continue
 
         try:
@@ -174,7 +184,7 @@ def save_good_region_control_overlay(
                 crop_fixed,
                 crop_moving,
                 data_range=crop_fixed.max() - crop_fixed.min(),
-                full=True
+                full=True,
             )
         except ValueError:
             continue
@@ -206,6 +216,7 @@ def save_good_region_control_overlay(
     logger.warning("No good region found after max attempts.")
     return ""
 
+
 def save_poorly_aligned_cropped_overlays(
     boxes,
     image_fixed: np.ndarray,
@@ -227,9 +238,10 @@ def save_poorly_aligned_cropped_overlays(
         # Compute SSIM map
         try:
             ssim_score, ssim_map = ssim(
-                crop_fixed, crop_moving,
+                crop_fixed,
+                crop_moving,
                 data_range=max(crop_fixed.max() - crop_fixed.min(), 1e-5),
-                full=True
+                full=True,
             )
         except ValueError:
             logger.warning(f"Skipping region ({minx}, {miny}) due to SSIM error.")
@@ -254,12 +266,16 @@ def save_poorly_aligned_cropped_overlays(
         fig.colorbar(im, ax=axes[1], fraction=0.046, pad=0.04)
 
         # Output path
-        path = str(Path(output_file_path).with_suffix("")) + f"_poor_overlay_{minx}_{miny}.png"
+        path = (
+            str(Path(output_file_path).with_suffix(""))
+            + f"_poor_overlay_{minx}_{miny}.png"
+        )
         fig.savefig(path, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
         logger.info(f"Saved poor overlay region with SSIM map to: {path}")
     return
+
 
 def save_visualization(
     image: np.ndarray,
@@ -339,6 +355,7 @@ def match_image_histograms(img1, img2):
 
     return img1, img2
 
+
 def match_image_histograms_local(img1, img2, tile_fraction=0.1, max_workers=8):
     """
     Match histograms between img1 and img2 using local tiles and ThreadPoolExecutor.
@@ -392,61 +409,142 @@ def match_image_histograms_local(img1, img2, tile_fraction=0.1, max_workers=8):
 
         for fut in as_completed(futures):
             y, x, tile1, tile2 = fut.result()
-            out1[y:y + tile1.shape[0], x:x + tile1.shape[1]] = tile1
-            out2[y:y + tile2.shape[0], x:x + tile2.shape[1]] = tile2
+            out1[y : y + tile1.shape[0], x : x + tile1.shape[1]] = tile1
+            out2[y : y + tile2.shape[0], x : x + tile2.shape[1]] = tile2
 
     return out1, out2
 
-def save_pyramidal_tiff_from_high_res(
-    image: np.ndarray,
+
+# def save_pyramidal_tiff_multi_channel(
+#     image_stacked: np.ndarray,
+#     output_file_path: Path,
+#     n_levels: int,
+#     downscale_factor: int = 2,
+#     description: str = "",
+# ):
+
+#     for channel in range(image_stacked.shape[0]):
+#         h, w = image_stacked[channel].shape
+
+#         # Normalize to [0, 1] if needed
+#         image = image.astype(np.float32)
+#         if image.max() > 1:
+#             image /= image.max()
+
+#         # Build pyramid: list of (2, H, W) arrays
+#         pyramid = []
+#         for i in range(n_levels):
+#             scale = downscale_factor ** i
+#             new_shape = (max(1, h // scale), max(1, w // scale))
+
+#             for channel in range(image_stacked.shape[0]):
+#                 image = image_stacked[channel]
+#                 image_resized = resize(image, new_shape, preserve_range=True, anti_aliasing=True)
+
+#             stacked = np.stack(
+#                 [img_as_uint(image_resized)], axis=0  # shape: (2, H, W)
+#             )
+#             pyramid.append(stacked)
+
+#     # Write TIFF with subIFDs
+#     with tifffile.TiffWriter(output_file_path, bigtiff=True) as tif:
+#         tif.write(
+#             data=pyramid[0],
+#             photometric="minisblack",
+#             planarconfig="separate",
+#             subifds=len(pyramid) - 1,
+#             metadata=None,
+#         )
+#         for level in pyramid[1:]:
+#             tif.write(
+#                 data=level,
+#                 photometric="minisblack",
+#                 planarconfig="separate",  # Must match base IFD
+#                 metadata=None,
+#             )
+
+#     logger.info(f"{description} multi-channel pyramidal TIFF saved to: {output_file_path}")
+#     return output_file_path
+
+
+def save_pyramidal_tiff_multi_channel(
+    image_stacked: np.ndarray,
     output_file_path: Path,
     n_levels: int,
     downscale_factor: int = 2,
     description: str = "",
 ):
-    # Normalize to [0, 1] if needed
-    image = image.astype(np.float32)
-    if image.max() > 1:
-        image /= image.max()
+    """
+    Save a multi-channel (C, H, W) image as an OME-TIFF with pyramidal subIFDs.
+    """
+    if image_stacked.ndim == 2:
+        image_stacked = image_stacked[np.newaxis, ...]
 
-    image = np.clip(image, 0, 1)
+    num_channels, height, width = image_stacked.shape
 
-    # Build pyramid using iterative downsampling
+    # Normalize all channels to [0, 1]
+    image_stacked = image_stacked.astype(np.float32)
+    if image_stacked.max() > 1:
+        image_stacked /= image_stacked.max()
+    image_stacked = np.clip(image_stacked, 0, 1)
+
     pyramid = []
-    current = image
+    current = image_stacked.copy()
+
     for _ in range(n_levels):
-        current_uint8 = img_as_ubyte(current)
+        # Convert to uint8 for saving
+        current_uint8 = np.stack([img_as_ubyte(ch) for ch in current], axis=0)
         pyramid.append(current_uint8)
 
-        new_shape = (
-            max(1, current.shape[0] // downscale_factor),
-            max(1, current.shape[1] // downscale_factor),
-        )
-
-        current = resize(
-            current,
-            new_shape,
-            preserve_range=True,
-            anti_aliasing=True,
+        # Downsample for next level
+        new_h = max(1, current.shape[1] // downscale_factor)
+        new_w = max(1, current.shape[2] // downscale_factor)
+        current = np.stack(
+            [
+                resize(ch, (new_h, new_w), preserve_range=True, anti_aliasing=True)
+                for ch in current
+            ],
+            axis=0,
         )
         current = np.clip(current, 0, 1)
 
-    # Write TIFF with subIFDs
     with tifffile.TiffWriter(output_file_path, bigtiff=True) as tif:
+        # OME metadata: define axes and channel names
+        metadata = {
+            "axes": "CYX",  # Indicates [Channel, Y, X] axes order
+        }
+        # Write the base level (level 0) with subIFDs for the other levels
         tif.write(
-            data=pyramid[0],
-            photometric="minisblack",
-            planarconfig="contig",
-            subifds=len(pyramid) - 1,
-            metadata=None,
+            pyramid[0],
+            subifds=len(pyramid) - 1,  # reserve SubIFDs for levels 1 and 2
+            photometric="minisblack",  # grayscale photometric interpretation
+            metadata=metadata,
+            dtype=np.uint8,
         )
-        for level in pyramid[1:]:
+        # Write each downsampled pyramid level as a SubIFD of the previous level
+        for level_data in pyramid[1:]:
             tif.write(
-                data=level,
+                level_data,
+                subfiletype=1,  # mark this image as a reduced-resolution (pyramid) layer
                 photometric="minisblack",
-                planarconfig="contig",
-                metadata=None,
+                dtype=np.uint8,
             )
 
-    logger.info(f"{description} pyramidal TIFF saved to: {output_file_path}")
+    logger.info(
+        f"{description} multi-channel pyramidal TIFF saved to: {output_file_path}"
+    )
     return output_file_path
+
+
+def get_num_channels(tiff_file: str, series: int, level) -> int:
+    """
+    Get the number of channels in a TIFF file.
+
+    Args:
+        tiff_file (str): Path to the TIFF file.
+
+    Returns:
+        int: Number of channels in the TIFF file.
+    """
+    with tifffile.TiffFile(tiff_file) as tif:
+        return len(tif.series[series].levels[level].pages)

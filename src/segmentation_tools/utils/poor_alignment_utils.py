@@ -20,7 +20,11 @@ def find_poorly_aligned_regions(
 ):
 
     _, ssim_full = ssim(
-        fixed_img, moving_img, data_range=fixed_img.max() - moving_img.min(), full=True, win_size=win_size
+        fixed_img,
+        moving_img,
+        data_range=fixed_img.max() - moving_img.min(),
+        full=True,
+        win_size=win_size,
     )
     min_brightness = min(fixed_img.max(), moving_img.max()) * min_brightness_factor
 
