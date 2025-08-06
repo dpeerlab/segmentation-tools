@@ -8,6 +8,7 @@ from skimage.transform import ProjectiveTransform
 
 import numpy as np
 
+
 def get_shape_at_level(
     tiff_path: Path, level: int = 0, series: int = 0
 ) -> tuple[int, int]:
@@ -108,3 +109,32 @@ def transform_polygons_to_high_res(polygons, transform):
             raise TypeError(f"Expected Polygon or MultiPolygon, got {type(poly)}")
 
     return transformed_polygons
+
+
+def warp_all_channels(
+    moving_image, fixed_image, transform, dapi_warped_img, dapi_channel, output_shape
+):
+    """
+    Warp all channels of a multi-channel image using a given transform.
+
+    Args:
+        image: Multi-channel image (shape: H x W x C).
+        transform: skimage.transform.AffineTransform or similar.
+        output_shape: Optional output shape (H x W)
+
+    Returns:
+        Warped multi-channel image.
+    """
+    if output_shape is None:
+        output_shape = image.shape[:2]
+
+    warped_image = np.zeros(
+        (output_shape[0], output_shape[1], image.shape[2]), dtype=image.dtype
+    )
+
+    for c in range(image.shape[2]):
+        warped_image[..., c] = skimage.transform.warp(
+            image[..., c], transform, output_shape=output_shape, preserve_range=True
+        )
+
+    return warped_image
