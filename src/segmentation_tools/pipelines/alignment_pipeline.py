@@ -271,6 +271,14 @@ class AlignmentPipeline(BaseModel):
                 preserve_range=True,
             )
 
+            if channel_idx == nuclei_channel_moving:
+                image_utils.save_image(
+                    image=warped,
+                    output_file_path=self._processed_tiff_dir
+                    / f"matched_warped_moving_dapi_high_res.tiff",
+                    description="Matched high-res warped moving DAPI",
+                )
+
             if apply_mirage_correction and channel_idx == nuclei_channel_moving:
                 warped = mirage_utils.run_mirage(
                     moving_img=warped,
@@ -385,7 +393,7 @@ class AlignmentPipeline(BaseModel):
             channel_moving=self.nuclei_channel_moving,
         )
 
-        # Optional: Save high-res fixed DAPI images
+        # Optional: Save high-res fixed DAPI image
         image_utils.save_image(
             image=matched_dapi_img_fixed_high_res,
             output_file_path=self._processed_tiff_dir / "matched_fixed_dapi_high_res.tiff",
@@ -412,7 +420,7 @@ class AlignmentPipeline(BaseModel):
         image_utils.save_pyramidal_tiff_multi_channel(
             image_stacked=warped_moving_stack,
             output_file_path=self._processed_tiff_dir
-            / "all_channels_moving_warped.tiff",
+            / "all_channels_moving_warped.ome.tiff",
             description="High-res all_channels moving and fixed",
             n_levels=moving_num_levels,
         )

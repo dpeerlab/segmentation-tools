@@ -413,60 +413,6 @@ def match_image_histograms_local(img1, img2, tile_fraction=0.1, max_workers=8):
             out2[y : y + tile2.shape[0], x : x + tile2.shape[1]] = tile2
 
     return out1, out2
-
-
-# def save_pyramidal_tiff_multi_channel(
-#     image_stacked: np.ndarray,
-#     output_file_path: Path,
-#     n_levels: int,
-#     downscale_factor: int = 2,
-#     description: str = "",
-# ):
-
-#     for channel in range(image_stacked.shape[0]):
-#         h, w = image_stacked[channel].shape
-
-#         # Normalize to [0, 1] if needed
-#         image = image.astype(np.float32)
-#         if image.max() > 1:
-#             image /= image.max()
-
-#         # Build pyramid: list of (2, H, W) arrays
-#         pyramid = []
-#         for i in range(n_levels):
-#             scale = downscale_factor ** i
-#             new_shape = (max(1, h // scale), max(1, w // scale))
-
-#             for channel in range(image_stacked.shape[0]):
-#                 image = image_stacked[channel]
-#                 image_resized = resize(image, new_shape, preserve_range=True, anti_aliasing=True)
-
-#             stacked = np.stack(
-#                 [img_as_uint(image_resized)], axis=0  # shape: (2, H, W)
-#             )
-#             pyramid.append(stacked)
-
-#     # Write TIFF with subIFDs
-#     with tifffile.TiffWriter(output_file_path, bigtiff=True) as tif:
-#         tif.write(
-#             data=pyramid[0],
-#             photometric="minisblack",
-#             planarconfig="separate",
-#             subifds=len(pyramid) - 1,
-#             metadata=None,
-#         )
-#         for level in pyramid[1:]:
-#             tif.write(
-#                 data=level,
-#                 photometric="minisblack",
-#                 planarconfig="separate",  # Must match base IFD
-#                 metadata=None,
-#             )
-
-#     logger.info(f"{description} multi-channel pyramidal TIFF saved to: {output_file_path}")
-#     return output_file_path
-
-
 def save_pyramidal_tiff_multi_channel(
     image_stacked: np.ndarray,
     output_file_path: Path,
@@ -474,16 +420,13 @@ def save_pyramidal_tiff_multi_channel(
     downscale_factor: int = 2,
     description: str = "",
 ):
-    """
-    Save a multi-channel (C, H, W) image as an OME-TIFF with pyramidal subIFDs.
-    """
+
     if image_stacked.ndim == 2:
         image_stacked = image_stacked[np.newaxis, ...]
 
-    num_channels, height, width = image_stacked.shape
-
     # Normalize all channels to [0, 1]
     image_stacked = image_stacked.astype(np.float32)
+
     if image_stacked.max() > 1:
         image_stacked /= image_stacked.max()
     image_stacked = np.clip(image_stacked, 0, 1)
@@ -495,7 +438,6 @@ def save_pyramidal_tiff_multi_channel(
         # Convert to uint8 for saving
         current_uint8 = np.stack([img_as_ubyte(ch) for ch in current], axis=0)
         pyramid.append(current_uint8)
-
         # Downsample for next level
         new_h = max(1, current.shape[1] // downscale_factor)
         new_w = max(1, current.shape[2] // downscale_factor)
@@ -506,34 +448,38 @@ def save_pyramidal_tiff_multi_channel(
             ],
             axis=0,
         )
+        if np.isnan(current).any():
+            logger.warning("NaNs detected in pyramid level.")
+            current = np.nan_to_num(current, nan=0.0)
         current = np.clip(current, 0, 1)
 
+    # Open TiffWriter to write an OME-TIFF (use bigtiff for large pyramids)
     with tifffile.TiffWriter(output_file_path, bigtiff=True) as tif:
         # OME metadata: define axes and channel names
         metadata = {
-            "axes": "CYX",  # Indicates [Channel, Y, X] axes order
+            'axes': 'CYX',                             # Indicates [Channel, Y, X] axes order
         }
         # Write the base level (level 0) with subIFDs for the other levels
         tif.write(
-            pyramid[0],
-            subifds=len(pyramid) - 1,  # reserve SubIFDs for levels 1 and 2
-            photometric="minisblack",  # grayscale photometric interpretation
-            metadata=metadata,
-            dtype=np.uint8,
+            pyramid[0], 
+            subifds=len(pyramid)-1,  # reserve SubIFDs for levels 1 and 2
+            photometric='minisblack',  # grayscale photometric interpretation
+            metadata=metadata, 
+            dtype=np.uint8
         )
         # Write each downsampled pyramid level as a SubIFD of the previous level
         for level_data in pyramid[1:]:
             tif.write(
-                level_data,
-                subfiletype=1,  # mark this image as a reduced-resolution (pyramid) layer
-                photometric="minisblack",
-                dtype=np.uint8,
+                level_data, 
+                subfiletype=1,       # mark this image as a reduced-resolution (pyramid) layer
+                photometric='minisblack',
+                dtype=np.uint8
             )
 
     logger.info(
         f"{description} multi-channel pyramidal TIFF saved to: {output_file_path}"
     )
-    return output_file_path
+    return
 
 
 def get_num_channels(tiff_file: str, series: int, level) -> int:

@@ -59,7 +59,7 @@ def run_mirage(
     logger.info("MIRAGE image alignment complete.")
 
     if save_img_dir:
-        output_path = os.path.join(save_img_dir, "mirage_aligned_image.tif")
+        output_path = os.path.join(save_img_dir, "mirage_aligned_image.tiff")
         tifffile.imwrite(output_path, aligned_image)
 
     return aligned_image
