@@ -1,6 +1,7 @@
 import os
 import mirage
 import tifffile
+from segmentation_tools.utils.image_utils import match_image_histograms
 
 from segmentation_tools.logger import logger
 
@@ -36,6 +37,7 @@ def run_mirage(
         Aligned image as a numpy array.
     """
     logger.info("Running MIRAGE alignment...")
+
     mirage_model = mirage.MIRAGE(
         images=moving_img,
         references=fixed_img,

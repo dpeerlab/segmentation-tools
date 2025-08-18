@@ -6,9 +6,9 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import tifffile
-from numpy.typing import ArrayLike
-from skimage.util import img_as_ubyte, img_as_uint
-from skimage.exposure import match_histograms
+
+from skimage.util import img_as_ubyte, img_as_float
+from skimage.exposure import match_histograms, equalize_adapthist, rescale_intensity
 from skimage.metrics import structural_similarity as ssim
 from skimage.transform import resize
 from shapely.geometry import box as shapely_box
@@ -18,23 +18,74 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from segmentation_tools.logger import logger
 
 
+# def normalize(
+#     img: np.ndarray,
+#     quantiles: ArrayLike = [0.001, 0.999],
+#     clahe_clip_limit: float = 1.0,
+#     clahe_tile_grid_size: tuple[int, int] = (20, 20),
+#     return_float: bool = True,
+# ) -> np.ndarray:
+#     """
+#     Normalize an image by clipping intensities to given quantiles and applying CLAHE.
+#     If image is RGB, applies normalization to each channel independently without CLAHE.
+#     """
+#     if img.ndim == 3 and img.shape[-1] == 3:
+#         # Normalize each channel separately, no CLAHE
+#         norm_channels = [
+#             normalize(
+#                 img[..., c],
+#                 quantiles,
+#                 clahe_clip_limit,
+#                 clahe_tile_grid_size,
+#                 return_float,
+#             )
+#             for c in range(3)
+#         ]
+#         return np.stack(norm_channels, axis=-1)
+
+#     # 1. Clip intensities to quantiles
+#     lo, hi = np.quantile(img, quantiles)
+#     img = np.clip(img, lo, hi)
+
+#     # 2. Scale to [0, 1]
+#     if hi - lo < 1e-6:
+#         img = np.zeros_like(img)
+#     else:
+#         img = (img - lo) / (hi - lo)
+
+#     # 3. Clean and convert
+#     img = np.nan_to_num(img, nan=0.0, posinf=1.0, neginf=0.0)
+#     img = np.clip(img, 0, 1)
+#     img_uint16 = img_as_uint(img)
+
+#     # 4. CLAHE in uint16
+#     clahe = cv2.createCLAHE(
+#         clipLimit=clahe_clip_limit, tileGridSize=clahe_tile_grid_size
+#     )
+#     img_clahe = clahe.apply(img_uint16)
+
+#     if return_float:
+#         return img_clahe.astype(np.float32) / 65535.0
+#     else:
+#         return img_as_ubyte(img_clahe / 65535.0)
+
+
 def normalize(
     img: np.ndarray,
-    quantiles: ArrayLike = [0.001, 0.999],
-    clahe_clip_limit: float = 1.0,
+    clahe_clip_limit: float = 0.01,          # skimage uses [0,1], not OpenCV’s ~1-40
     clahe_tile_grid_size: tuple[int, int] = (20, 20),
     return_float: bool = True,
 ) -> np.ndarray:
     """
-    Normalize an image by clipping intensities to given quantiles and applying CLAHE.
-    If image is RGB, applies normalization to each channel independently without CLAHE.
+    Normalize an image using adaptive histogram equalization (CLAHE) with skimage.
+    If image is RGB, applies normalization to each channel independently.
     """
     if img.ndim == 3 and img.shape[-1] == 3:
-        # Normalize each channel separately, no CLAHE
+        logger.info("Shouldn't be here?")
+        # Apply per-channel
         norm_channels = [
             normalize(
                 img[..., c],
-                quantiles,
                 clahe_clip_limit,
                 clahe_tile_grid_size,
                 return_float,
@@ -43,31 +94,22 @@ def normalize(
         ]
         return np.stack(norm_channels, axis=-1)
 
-    # 1. Clip intensities to quantiles
-    lo, hi = np.quantile(img, quantiles)
-    img = np.clip(img, lo, hi)
-
-    # 2. Scale to [0, 1]
-    if hi - lo < 1e-6:
-        img = np.zeros_like(img)
-    else:
-        img = (img - lo) / (hi - lo)
-
-    # 3. Clean and convert
+    # Ensure float in [0,1]
+    img = img_as_float(img)
     img = np.nan_to_num(img, nan=0.0, posinf=1.0, neginf=0.0)
     img = np.clip(img, 0, 1)
-    img_uint16 = img_as_uint(img)
 
-    # 4. CLAHE in uint16
-    clahe = cv2.createCLAHE(
-        clipLimit=clahe_clip_limit, tileGridSize=clahe_tile_grid_size
+    # Apply skimage CLAHE
+    img_eq = equalize_adapthist(
+        img,
+        clip_limit=clahe_clip_limit,
+        kernel_size=clahe_tile_grid_size
     )
-    img_clahe = clahe.apply(img_uint16)
 
     if return_float:
-        return img_clahe.astype(np.float32) / 65535.0
+        return img_eq.astype(np.float32)
     else:
-        return img_as_ubyte(img_clahe / 65535.0)
+        return (img_eq * 255).astype(np.uint8)
 
 
 def create_rgb_overlay(fixed, moving):
@@ -339,21 +381,44 @@ def save_image(
     )
     return
 
+def calculate_shannon_entropy(image):
+    """
+    Calculates the Shannon entropy of an image's histogram.
+    """
+    hist, _ = np.histogram(image.flatten(), bins=256, range=(0, 1))
+    hist = hist / hist.sum()
+    hist = hist[hist > 0]
+    return -np.sum(hist * np.log2(hist))
+
 
 def match_image_histograms(img1, img2):
-    m1 = np.mean(img1)
-    m2 = np.mean(img2)
+    entropy_one = calculate_shannon_entropy(img1)
+    logger.info(f"Entropy one, {entropy_one}")
+    entropy_two = calculate_shannon_entropy(img2)
+    logger.info(f"Entropy two, {entropy_two}")
 
     # Histogram match using float32 for better accuracy
     img1 = img1.astype(np.float32)
     img2 = img2.astype(np.float32)
-
-    if m1 < m2:
+    
+    if entropy_one > entropy_two:
+        logger.info("Matching histograms")
         img1 = match_histograms(img1, img2)
     else:
+        logger.info("Matching histograms")
         img2 = match_histograms(img2, img1)
 
-    return img1, img2
+    logger.info("Histograms matched")
+
+    img1 = rescale_intensity(img1, in_range="image", out_range=(0,1))
+    logger.info("Rescaling intensity one")
+    img2 = rescale_intensity(img2, in_range="image", out_range=(0,1))
+    logger.info("Rescaling intensity two")
+
+    img1 = np.nan_to_num(img1, nan=0.0)
+    img2 = np.nan_to_num(img2, nan=0.0)
+
+    return img1.astype(np.float32), img2.astype(np.float32)
 
 
 def match_image_histograms_local(img1, img2, tile_fraction=0.1, max_workers=8):
