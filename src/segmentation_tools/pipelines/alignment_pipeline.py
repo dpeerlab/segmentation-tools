@@ -9,6 +9,8 @@ import tifffile
 from pydantic import BaseModel, Field, PrivateAttr, validator
 from pprint import pprint
 
+from skimage.exposure import equalize_adapthist
+
 import segmentation_tools.utils.sift_alignment_utils as sift_alignment_utils
 import segmentation_tools.utils.image_utils as image_utils
 import segmentation_tools.utils.convert_image_utils as convert_utils
@@ -128,16 +130,24 @@ class AlignmentPipeline(BaseModel):
             fixed_file, series=series_fixed, level=level_fixed
         )
 
+        logger.info("Loaded in images")
+
         # Normalize images
         normalized_moving_dapi = image_utils.normalize(
             dapi_img_moving, return_float=True
         )
+
+        logger.info(f"Normalized moving, {normalized_moving_dapi.max()=}")
         normalized_fixed_dapi = image_utils.normalize(dapi_img_fixed, return_float=True)
+
+        logger.info(f"Normalized fixed, {normalized_fixed_dapi.max()=}")
 
         matched_moving_dapi, matched_fixed_dapi = image_utils.match_image_histograms(
             normalized_moving_dapi,
             normalized_fixed_dapi,
         )
+
+        logger.info("matched images")
 
         self._garbage_collect_objects(
             [
@@ -258,11 +268,18 @@ class AlignmentPipeline(BaseModel):
                 key=channel_idx,
             )
 
-            img_moving = image_utils.normalize(img_moving, return_float=True)
+            ic(img_moving.max())
 
+            img_moving = image_utils.normalize(img_moving, return_float=True)
+            
+            ic(img_moving.max())
             matched_moving, matched_fixed = image_utils.match_image_histograms(
                 img_moving, matched_dapi_img_fixed_high_res
             )
+
+            ic(matched_moving.max())
+
+            ic(matched_fixed.max())
 
             warped = skimage.transform.warp(
                 matched_moving,
@@ -272,6 +289,13 @@ class AlignmentPipeline(BaseModel):
             )
 
             if channel_idx == nuclei_channel_moving:
+                if apply_mirage_correction:
+                    warped = mirage_utils.run_mirage(
+                        moving_img=warped,
+                        fixed_img=matched_fixed,
+                        save_img_dir=self._processed_tiff_dir,
+                    )
+            
                 image_utils.save_image(
                     image=warped,
                     output_file_path=self._processed_tiff_dir
@@ -279,12 +303,7 @@ class AlignmentPipeline(BaseModel):
                     description="Matched high-res warped moving DAPI",
                 )
 
-            if apply_mirage_correction and channel_idx == nuclei_channel_moving:
-                warped = mirage_utils.run_mirage(
-                    moving_img=warped,
-                    fixed_img=matched_fixed,
-                    save_img_dir=None,
-                )
+
             warped_channels.append(warped)
 
         warped_moving_stack = np.stack(warped_channels, axis=0)  # (C, H, W)
@@ -365,13 +384,12 @@ class AlignmentPipeline(BaseModel):
         #         sift_level_fixed=sift_level_fixed,
         #     )
 
-        # image_utils.save_full_overlay( ### TODO: Save only if save_intermediate_outputs is True
-        #     image_fixed=matched_fixed_dapi_ds,
-        #     image_moving=matched_warped_moving_dapi_ds,
-        #     boxes=poorly_aligned_regions,
-        #     output_file_path=self.output_dir / "dapi_downsampled_overlay",
-        #     plot_axis=True,
-        # )
+        image_utils.save_full_overlay( ### TODO: Save only if save_intermediate_outputs is True
+            image_fixed=matched_fixed_dapi_ds,
+            image_moving=matched_warped_moving_dapi_ds,
+            output_file_path=self.output_dir / "dapi_downsampled_overlay_ds.png",
+            plot_axis=True,
+        )
 
         # Free memory
         self._garbage_collect_objects(
@@ -400,6 +418,7 @@ class AlignmentPipeline(BaseModel):
             description="Matched high-res fixed DAPI",
         )
 
+        logger.info("Starting warping of all channels")
         # Step 8: Warp moving image at high resolution
         warped_moving_stack = self._warp_high_res_image_all_channels(
             moving_file=self.moving_file,
