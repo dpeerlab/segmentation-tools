@@ -289,13 +289,6 @@ class AlignmentPipeline(BaseModel):
             )
 
             if channel_idx == nuclei_channel_moving:
-                if apply_mirage_correction:
-                    warped = mirage_utils.run_mirage(
-                        moving_img=warped,
-                        fixed_img=matched_fixed,
-                        save_img_dir=self._processed_tiff_dir,
-                    )
-            
                 image_utils.save_image(
                     image=warped,
                     output_file_path=self._processed_tiff_dir
@@ -303,6 +296,12 @@ class AlignmentPipeline(BaseModel):
                     description="Matched high-res warped moving DAPI",
                 )
 
+                if apply_mirage_correction:
+                    warped = mirage_utils.run_mirage(
+                        moving_img=warped,
+                        fixed_img=matched_fixed,
+                        save_img_dir=self._processed_tiff_dir,
+                    )
 
             warped_channels.append(warped)
 
