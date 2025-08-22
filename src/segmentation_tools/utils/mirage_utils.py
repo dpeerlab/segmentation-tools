@@ -2,6 +2,7 @@ import os
 import mirage
 import tifffile
 from segmentation_tools.utils.image_utils import match_image_histograms
+import tensorflow as tf
 
 from segmentation_tools.logger import logger
 
@@ -51,10 +52,15 @@ def run_mirage(
     )
 
     logger.info("Training MIRAGE model...")
-    mirage_model.train(batch_size=256, num_steps=512, lr__sched=True, LR=0.005)
+    try:
+        mirage_model.train(batch_size=256, num_steps=512, lr__sched=True, LR=0.005)
 
-    logger.info("MIRAGE model training complete. Computing transform...")
-    mirage_model.compute_transform()
+        logger.info("MIRAGE model training complete. Computing transform...")
+        
+        mirage_model.compute_transform()
+    except Exception as e:
+        logger.error(f"Error computing transform: {e}")
+        return None
 
     logger.info("Applying transform to moving image...")
     aligned_image = mirage_model.apply_transform(moving_img)

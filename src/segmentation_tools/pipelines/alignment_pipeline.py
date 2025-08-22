@@ -9,7 +9,6 @@ import tifffile
 from pydantic import BaseModel, Field, PrivateAttr, validator
 from pprint import pprint
 
-from skimage.exposure import equalize_adapthist
 
 import segmentation_tools.utils.sift_alignment_utils as sift_alignment_utils
 import segmentation_tools.utils.image_utils as image_utils
@@ -131,6 +130,7 @@ class AlignmentPipeline(BaseModel):
         )
 
         logger.info("Loaded in images")
+        logger.info(f"Moving shape {dapi_img_moving.shape}, Fixed shape {dapi_img_fixed.shape}")
 
         # Normalize images
         normalized_moving_dapi = image_utils.normalize(
@@ -147,7 +147,7 @@ class AlignmentPipeline(BaseModel):
             normalized_fixed_dapi,
         )
 
-        logger.info("matched images")
+        logger.info("Matched moving and fixed images")
 
         self._garbage_collect_objects(
             [
@@ -221,6 +221,7 @@ class AlignmentPipeline(BaseModel):
         )
         return tm_combined
 
+
     def _find_poorly_aligned_regions(self, fixed_img, moving_img, sift_level_fixed):
         poorly_aligned_regions = poor_alignment_utils.find_poorly_aligned_regions(
             fixed_img=fixed_img,
@@ -268,25 +269,23 @@ class AlignmentPipeline(BaseModel):
                 key=channel_idx,
             )
 
-            ic(img_moving.max())
-
             img_moving = image_utils.normalize(img_moving, return_float=True)
             
-            ic(img_moving.max())
             matched_moving, matched_fixed = image_utils.match_image_histograms(
                 img_moving, matched_dapi_img_fixed_high_res
             )
 
-            ic(matched_moving.max())
-
-            ic(matched_fixed.max())
+            logger.info(f"Loaded matched images high res for warping channel {channel_idx}")
 
             warped = skimage.transform.warp(
                 matched_moving,
                 tm_combined,
                 output_shape=matched_fixed.shape,
                 preserve_range=True,
+                order=5,
             )
+
+            logger.info(f"Warped channel {channel_idx} at high resolution")
 
             if channel_idx == nuclei_channel_moving:
                 image_utils.save_image(
@@ -302,6 +301,9 @@ class AlignmentPipeline(BaseModel):
                         fixed_img=matched_fixed,
                         save_img_dir=self._processed_tiff_dir,
                     )
+
+                    if warped is None:
+                        return None
 
             warped_channels.append(warped)
 
@@ -329,9 +331,14 @@ class AlignmentPipeline(BaseModel):
             intermediates_dir=self._processed_tiff_dir,
         )
 
+        shutil.copy(
+            self.fixed_file,
+            self._processed_tiff_dir / "fixed_image.ome.tiff",
+        )
+
         # Step 2: Determine downsampled levels for alignment
-        sift_level_fixed, sift_level_moving = (
-            sift_alignment_utils.determine_alignment_levels(
+        sift_level_moving, sift_level_fixed = (
+            sift_alignment_utils.get_best_common_level(
                 moving_file=self.moving_file,
                 fixed_file=self.fixed_file,
                 min_size=1500,  # Minimum size for downsampled images
@@ -351,6 +358,12 @@ class AlignmentPipeline(BaseModel):
             level_moving=sift_level_moving,
             level_fixed=sift_level_fixed,
             channel_moving=self.nuclei_channel_moving,
+        )
+
+        image_utils.save_image(
+            image = matched_fixed_dapi_ds,
+            output_file_path = self._processed_tiff_dir / "matched_fixed_dapi_ds.tiff",
+            description="Matched downsampled fixed DAPI",
         )
 
 
@@ -428,6 +441,18 @@ class AlignmentPipeline(BaseModel):
             apply_mirage_correction=self.apply_mirage_correction,
             nuclei_channel_moving=self.nuclei_channel_moving,
         )
+
+        while warped_moving_stack is None:
+            self.high_res_level += 1
+            warped_moving_stack = self._warp_high_res_image_all_channels(
+                moving_file=self.moving_file,
+                series_moving=self.series_moving,
+                high_res_level=self.high_res_level,
+                tm_combined=tm_combined,
+                matched_dapi_img_fixed_high_res=matched_dapi_img_fixed_high_res,
+                apply_mirage_correction=self.apply_mirage_correction,
+                nuclei_channel_moving=self.nuclei_channel_moving,
+            )
 
         # Save warped moving stack
         with tifffile.TiffFile(self.moving_file) as tif:
