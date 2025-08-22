@@ -5,6 +5,7 @@ from skimage.transform import AffineTransform, warp
 from shapely.geometry import MultiPolygon, Polygon
 from shapely.ops import transform as shapely_transform
 from skimage.transform import ProjectiveTransform
+from pprint import pprint
 
 import numpy as np
 
@@ -56,7 +57,6 @@ def get_level_transform(
     scale_x = from_dims["X"] / to_dims["X"]
     scale_y = from_dims["Y"] / to_dims["Y"]
     return AffineTransform(scale=(scale_x, scale_y))
-
 
 def get_crop_transform(
     path_to_tiff: os.PathLike, level_to: int, level_from: int = 0

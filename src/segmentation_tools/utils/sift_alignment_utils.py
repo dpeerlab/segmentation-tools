@@ -15,7 +15,7 @@ from segmentation_tools.logger import logger
 
 
 def get_best_common_level(
-    img1_path: str | Path, img2_path: str | Path, min_size: int = 2048
+    moving_file: str | Path, fixed_file: str | Path, min_size: int = 2048
 ) -> int:
     """
     Determine the lowest resolution pyramid level (largest index) such that
@@ -29,21 +29,21 @@ def get_best_common_level(
     Returns:
         int: Best level index (0 = highest resolution).
     """
-
-    img1_series = tifffile.TiffFile(img1_path).series[0].levels
-    img2_series = tifffile.TiffFile(img2_path).series[0].levels
+    moving_series = tifffile.TiffFile(moving_file).series[0].levels
+    fixed_series = tifffile.TiffFile(fixed_file).series[0].levels
 
     # Get list of shapes for each level
-    levels1 = [page.shape for page in img1_series]
-    levels2 = [page.shape for page in img2_series]
+    levels_moving = [page.shape for page in moving_series]
+    levels_fixed = [page.shape for page in fixed_series]
 
-    level1 = find_max_valid_level(levels1, min_size)
-    level2 = find_max_valid_level(levels2, min_size)
+    moving_level = find_max_valid_level(levels_moving, min_size)
+    fixed_level = find_max_valid_level(levels_fixed, min_size)
 
-    level1 = min(level1, level2)
-    level2 = level1
+    moving_level = min(moving_level, fixed_level)
+    fixed_level = moving_level
 
-    return level1, level2
+    # return 1, 1
+    return moving_level, fixed_level
 
 
 def find_max_valid_level(levels: list, min_size: int) -> int:
@@ -224,11 +224,3 @@ def find_best_sift(mvg_img, fxd_img, save_img_dir=None, draw_matches=False):
     logger.info(f"Best alignment found: {best_name} with score {best_score:.4f}")
     return ProjectiveTransform(matrix=np.linalg.inv(best_matrix))
 
-
-def determine_alignment_levels(moving_file, fixed_file, min_size=1500):
-    """Determine appropriate downsampled levels for alignment."""
-    return get_best_common_level(
-        img1_path=moving_file,
-        img2_path=fixed_file,
-        min_size=min_size,
-    )
