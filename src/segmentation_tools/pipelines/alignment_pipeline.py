@@ -1,5 +1,6 @@
 import gc
 import os
+import sys
 import shutil
 from pathlib import Path
 
@@ -8,6 +9,8 @@ import skimage
 import tifffile
 from pydantic import BaseModel, Field, PrivateAttr, validator
 from pprint import pprint
+import cupy as cp
+import cucim.skimage as cs
 
 
 import segmentation_tools.utils.sift_alignment_utils as sift_alignment_utils
@@ -60,6 +63,7 @@ class AlignmentPipeline(BaseModel):
     _processed_tiff_dir: Path = PrivateAttr()
     _poor_regions_dir: Path = PrivateAttr()
     _rotations_dir: Path = PrivateAttr()
+    _visualizations_dir: Path = PrivateAttr()
 
     def model_post_init(self, __context) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -103,11 +107,13 @@ class AlignmentPipeline(BaseModel):
         self._rotations_dir = self.output_dir / "rotations"
         self._rotations_dir.mkdir(parents=True, exist_ok=True)
 
+        self._visualizations_dir = self.output_dir / "visualizations"
+        self._visualizations_dir.mkdir(parents=True, exist_ok=True)
         return
 
     ### ALIGNMENT HELPER FUNCTIONS ###
 
-    def _load_matching_dapi_images(
+    def _load_normalized_dapi_images(
         self,
         moving_file,
         fixed_file,
@@ -118,83 +124,85 @@ class AlignmentPipeline(BaseModel):
         channel_moving,
     ):
         # Load and normalize images at downsampled levels
-        dapi_img_moving = tifffile.imread(
+        dapi_moving_image = tifffile.imread(
             moving_file,
             series=series_moving,
             key=channel_moving,
             level=level_moving,
         )
         # Read and normalize fixed image at the specified levels
-        dapi_img_fixed = tifffile.imread(
+        dapi_fixed_image = tifffile.imread(
             fixed_file, series=series_fixed, level=level_fixed
         )
 
         logger.info("Loaded in images")
-        logger.info(f"Moving shape {dapi_img_moving.shape}, Fixed shape {dapi_img_fixed.shape}")
+        logger.info(
+            f"Moving shape {dapi_moving_image.shape}, Fixed shape {dapi_fixed_image.shape}"
+        )
+
+        dapi_moving_image_gpu = cp.asarray(dapi_moving_image)
+        dapi_fixed_image_gpu = cp.asarray(dapi_fixed_image)
 
         # Normalize images
-        normalized_moving_dapi = image_utils.normalize(
-            dapi_img_moving, return_float=True
-        )
+        normalized_moving_dapi_gpu = image_utils.normalize(dapi_moving_image_gpu)
 
-        logger.info(f"Normalized moving, {normalized_moving_dapi.max()=}")
-        normalized_fixed_dapi = image_utils.normalize(dapi_img_fixed, return_float=True)
+        logger.info(f"Normalized moving, {normalized_moving_dapi_gpu.max()=}")
+        normalized_fixed_dapi_gpu = image_utils.normalize(dapi_fixed_image_gpu)
 
-        logger.info(f"Normalized fixed, {normalized_fixed_dapi.max()=}")
-
-        matched_moving_dapi, matched_fixed_dapi = image_utils.match_image_histograms(
-            normalized_moving_dapi,
-            normalized_fixed_dapi,
-        )
-
-        logger.info("Matched moving and fixed images")
+        logger.info(f"Normalized fixed, {normalized_fixed_dapi_gpu.max()=}")
 
         self._garbage_collect_objects(
-            [
-                dapi_img_moving,
-                dapi_img_fixed,
-                normalized_moving_dapi,
-                normalized_fixed_dapi,
-            ]
+            dapi_moving_image,
+            dapi_fixed_image,
+            normalized_moving_dapi_gpu,
+            normalized_fixed_dapi_gpu,
         )
 
-        return matched_moving_dapi, matched_fixed_dapi
+        return cp.asnumpy(normalized_moving_dapi_gpu), cp.asnumpy(
+            normalized_fixed_dapi_gpu
+        )
 
     def _get_sift_transform_and_warp(
         self,
-        matched_moving_dapi_ds,
-        matched_fixed_dapi_ds,
-        rotations_dir=None,
-        save_tiff_dir=None,
-        draw_matches=False,
+        normalized_moving_dapi_ds: np.ndarray,
+        normalized_fixed_dapi_ds: np.ndarray,
+        rotations_dir: os.PathLike = None,
+        save_tiff_dir: os.PathLike = None,
+        draw_matches: bool = False,
     ):
         """Get SIFT features and warp moving image at downsampled resolution."""
         # Find SIFT transform between downsampled images
         tm_sift = sift_alignment_utils.find_best_sift(
-            mvg_img=matched_moving_dapi_ds,
-            fxd_img=matched_fixed_dapi_ds,
+            moving_image=normalized_moving_dapi_ds,
+            fixed_image=normalized_fixed_dapi_ds,
             save_img_dir=rotations_dir,
             draw_matches=draw_matches,
         )
-
         # Warp downsampled
         logger.info("Warping moving DAPI at downsampled resolution")
-        matched_warped_moving_dapi_ds = skimage.transform.warp(
-            matched_moving_dapi_ds,
+        normalized_warped_dapi_ds = skimage.transform.warp(
+            normalized_moving_dapi_ds,
             tm_sift,
-            output_shape=matched_fixed_dapi_ds.shape,
+            output_shape=normalized_fixed_dapi_ds.shape,
             preserve_range=True,
         )
 
         if save_tiff_dir is not None:
             image_utils.save_image(  ## TODO: Save only if save_intermediate_outputs is True
-                image=matched_warped_moving_dapi_ds,
+                image=normalized_warped_dapi_ds,
                 output_file_path=self._processed_tiff_dir
-                / f"matched_warped_moving_dapi_ds.tiff",
+                / f"normalized_warped_moving_dapi_ds.tiff",
                 description="Matched downsample warped moving DAPI",
             )
 
-        return tm_sift, matched_warped_moving_dapi_ds
+            image_utils.save_full_overlay(
+                fixed_image=normalized_fixed_dapi_ds,
+                moving_image=normalized_warped_dapi_ds,
+                output_file_path=self._visualizations_dir / f"warped_overlay_ds.png",
+                title="Normalized Warped Overlay Downsampled",
+            )
+
+        return tm_sift
 
     def _get_combined_transform(
         self,
@@ -221,39 +229,16 @@ class AlignmentPipeline(BaseModel):
         )
         return tm_combined
 
-
-    def _find_poorly_aligned_regions(self, fixed_img, moving_img, sift_level_fixed):
-        poorly_aligned_regions = poor_alignment_utils.find_poorly_aligned_regions(
-            fixed_img=fixed_img,
-            moving_img=moving_img,
-            win_size=11,
-            min_brightness_factor=0.15,
-            min_area_factor=5e-5,
-            ssim_bounds=(0.0, 0.7),
-            output_file_path=self._poor_regions_dir / "poorly_aligned_regions_mask",
-        )
-
-        transformed_poorly_aligned_regions = (
-            transform_utils.transform_polygons_to_high_res(
-                polygons=poorly_aligned_regions,
-                transform=transform_utils.get_level_transform(
-                    self.fixed_file,
-                    level_to=sift_level_fixed,
-                    level_from=self.high_res_level,
-                ),
-            )
-        )
-
-        return poorly_aligned_regions, transformed_poorly_aligned_regions
-
     def _warp_high_res_image_all_channels(
         self,
         moving_file,
+        fixed_file,
         series_moving,
+        series_fixed,
         high_res_level,
         tm_combined,
-        matched_dapi_img_fixed_high_res,
         nuclei_channel_moving,
+        save_img_dir=None,
         apply_mirage_correction=False,
     ):
         num_moving_channels = image_utils.get_num_channels(
@@ -262,28 +247,38 @@ class AlignmentPipeline(BaseModel):
 
         warped_channels = []
         for channel_idx in range(num_moving_channels):
-            img_moving = tifffile.imread(
+            moving_image = tifffile.imread(
                 moving_file,
                 series=series_moving,
                 level=high_res_level,
                 key=channel_idx,
             )
 
-            img_moving = image_utils.normalize(img_moving, return_float=True)
-            
-            matched_moving, matched_fixed = image_utils.match_image_histograms(
-                img_moving, matched_dapi_img_fixed_high_res
+            fixed_dapi_shape = transform_utils.get_shape_at_level(
+                tiff_path=fixed_file, level=high_res_level, series=series_fixed
             )
 
-            logger.info(f"Loaded matched images high res for warping channel {channel_idx}")
+            # moving_image = cp.asarray(moving_image)
+            self._garbage_collect_objects(moving_image)
+
+            # moving_image_gpu = image_utils.normalize(moving_image)
+            logger.info(
+                f"Loaded normalized image high res for warping channel {channel_idx}"
+            )
 
             warped = skimage.transform.warp(
-                matched_moving,
+                moving_image,
                 tm_combined,
-                output_shape=matched_fixed.shape,
+                output_shape=fixed_dapi_shape,
                 preserve_range=True,
                 order=5,
             )
+
+            # self._garbage_collect_objects(moving_image)
+
+            # warped = cp.asnumpy(warped_gpu)
+
+            # self._garbage_collect_objects(warped)
 
             logger.info(f"Warped channel {channel_idx} at high resolution")
 
@@ -296,14 +291,35 @@ class AlignmentPipeline(BaseModel):
                 )
 
                 if apply_mirage_correction:
-                    warped = mirage_utils.run_mirage(
-                        moving_img=warped,
-                        fixed_img=matched_fixed,
-                        save_img_dir=self._processed_tiff_dir,
+                    normalized_fixed_dapi = image_utils.normalize(
+                        cp.asarray(
+                            tifffile.imread(
+                                fixed_file,
+                                series=series_fixed,
+                                level=high_res_level,
+                            )
+                        )
                     )
 
-                    if warped is None:
-                        return None
+                    poor_alignment_utils.compute_ssim_tile_heatmap(
+                        fixed_image = cp.asnumpy(normalized_fixed_dapi),
+                        moving_image = warped,
+                        save_img_dir=self._poor_regions_dir,
+                        prefix = "pre_mirage"
+                    )
+
+                    warped = mirage_utils.run_mirage(
+                        moving_image=warped,
+                        fixed_image=normalized_fixed_dapi,
+                        save_img_dir=save_img_dir,
+                    )
+
+                    poor_alignment_utils.compute_ssim_tile_heatmap(
+                        fixed_image = cp.asnumpy(normalized_fixed_dapi),
+                        moving_image = warped,
+                        save_img_dir=self._poor_regions_dir,
+                        prefix = "post_mirage"
+                    )
 
             warped_channels.append(warped)
 
@@ -314,6 +330,10 @@ class AlignmentPipeline(BaseModel):
         for obj in objects:
             del obj
         gc.collect()
+
+        cp.get_default_memory_pool().free_all_blocks()
+        cp.get_default_pinned_memory_pool().free_all_blocks()
+        return
 
     ### RUN FUNCTIONS ###
     def run(self):
@@ -350,28 +370,23 @@ class AlignmentPipeline(BaseModel):
         )
 
         # Step 3: Load and normalize images at downsampled levels
-        matched_moving_dapi_ds, matched_fixed_dapi_ds = self._load_matching_dapi_images(
-            moving_file=self.moving_file,
-            fixed_file=self.fixed_file,
-            series_moving=self.series_moving,
-            series_fixed=self.series_fixed,
-            level_moving=sift_level_moving,
-            level_fixed=sift_level_fixed,
-            channel_moving=self.nuclei_channel_moving,
+        normalized_moving_dapi_ds_cpu, normalized_fixed_dapi_ds_cpu = (
+            self._load_normalized_dapi_images(
+                moving_file=self.moving_file,
+                fixed_file=self.fixed_file,
+                series_moving=self.series_moving,
+                series_fixed=self.series_fixed,
+                level_moving=sift_level_moving,
+                level_fixed=sift_level_fixed,
+                channel_moving=self.nuclei_channel_moving,
+            )
         )
-
-        image_utils.save_image(
-            image = matched_fixed_dapi_ds,
-            output_file_path = self._processed_tiff_dir / "matched_fixed_dapi_ds.tiff",
-            description="Matched downsampled fixed DAPI",
-        )
-
 
         # Step 4: Get SIFT transform and warp moving image at downsampled resolution
-        tm_sift, matched_warped_moving_dapi_ds = self._get_sift_transform_and_warp(
+        tm_sift = self._get_sift_transform_and_warp(
             rotations_dir=self._rotations_dir,
-            matched_moving_dapi_ds=matched_moving_dapi_ds,
-            matched_fixed_dapi_ds=matched_fixed_dapi_ds,
+            normalized_moving_dapi_ds=normalized_moving_dapi_ds_cpu,
+            normalized_fixed_dapi_ds=normalized_fixed_dapi_ds_cpu,
             save_tiff_dir=self._processed_tiff_dir,
             draw_matches=False,
         )
@@ -386,102 +401,39 @@ class AlignmentPipeline(BaseModel):
             high_res_level=self.high_res_level,
         )
 
-        # # Step 6: (Optional) Find poorly aligned regions
-        # poorly_aligned_regions = None
-        # if self.find_poorly_aligned_regions:
-        #     logger.info("Finding poorly aligned regions")
-        #     poorly_aligned_regions, transformed_poorly_aligned_regions = self._find_poorly_aligned_regions(
-        #         fixed_img=matched_fixed_dapi_ds,
-        #         moving_img=matched_warped_moving_dapi_ds,
-        #         sift_level_fixed=sift_level_fixed,
-        #     )
-
-        image_utils.save_full_overlay( ### TODO: Save only if save_intermediate_outputs is True
-            image_fixed=matched_fixed_dapi_ds,
-            image_moving=matched_warped_moving_dapi_ds,
-            output_file_path=self.output_dir / "dapi_downsampled_overlay_ds.png",
-            plot_axis=True,
-        )
-
-        # Free memory
         self._garbage_collect_objects(
-            [
-                matched_moving_dapi_ds,
-                matched_fixed_dapi_ds,
-                matched_warped_moving_dapi_ds,
-            ]
+            normalized_moving_dapi_ds_cpu, normalized_fixed_dapi_ds_cpu, tm_sift
         )
+        logger.info("Starting warping of all channels")
 
-        # Step 7: Load high resolution images
-        _, matched_dapi_img_fixed_high_res = self._load_matching_dapi_images(
+        # Step 8: Warp moving image at high resolution
+        warped_moving_stack = self._warp_high_res_image_all_channels(
             moving_file=self.moving_file,
             fixed_file=self.fixed_file,
             series_moving=self.series_moving,
             series_fixed=self.series_fixed,
-            level_moving=self.high_res_level,
-            level_fixed=self.high_res_level,
-            channel_moving=self.nuclei_channel_moving,
-        )
-
-        # Optional: Save high-res fixed DAPI image
-        image_utils.save_image(
-            image=matched_dapi_img_fixed_high_res,
-            output_file_path=self._processed_tiff_dir / "matched_fixed_dapi_high_res.tiff",
-            description="Matched high-res fixed DAPI",
-        )
-
-        logger.info("Starting warping of all channels")
-        # Step 8: Warp moving image at high resolution
-        warped_moving_stack = self._warp_high_res_image_all_channels(
-            moving_file=self.moving_file,
-            series_moving=self.series_moving,
             high_res_level=self.high_res_level,
             tm_combined=tm_combined,
-            matched_dapi_img_fixed_high_res=matched_dapi_img_fixed_high_res,
-            apply_mirage_correction=self.apply_mirage_correction,
             nuclei_channel_moving=self.nuclei_channel_moving,
+            apply_mirage_correction=self.apply_mirage_correction,
+            save_img_dir=self._processed_tiff_dir,
         )
 
-        while warped_moving_stack is None:
-            self.high_res_level += 1
-            warped_moving_stack = self._warp_high_res_image_all_channels(
-                moving_file=self.moving_file,
-                series_moving=self.series_moving,
-                high_res_level=self.high_res_level,
-                tm_combined=tm_combined,
-                matched_dapi_img_fixed_high_res=matched_dapi_img_fixed_high_res,
-                apply_mirage_correction=self.apply_mirage_correction,
-                nuclei_channel_moving=self.nuclei_channel_moving,
-            )
-
         # Save warped moving stack
-        with tifffile.TiffFile(self.moving_file) as tif:
-            moving_num_levels = (
-                len(tif.series[self.series_moving].levels) - self.high_res_level
-            )
+        moving_num_levels = image_utils.get_num_levels(
+            tiff_file=self.moving_file,
+            series=self.series_moving,
+            level=self.high_res_level,
+        )
+
+        levels_to_save = moving_num_levels - self.high_res_level
 
         image_utils.save_pyramidal_tiff_multi_channel(
             image_stacked=warped_moving_stack,
             output_file_path=self._processed_tiff_dir
             / "all_channels_moving_warped.ome.tiff",
             description="High-res all_channels moving and fixed",
-            n_levels=moving_num_levels,
+            num_levels=levels_to_save,
         )
 
-        # # Step 9: (Optional) Save poorly aligned regions overlays at high resolution
-        # if self.find_poorly_aligned_regions:
-        #     image_utils.save_poorly_aligned_cropped_overlays(
-        #         image_fixed=matched_dapi_img_fixed_high_res,
-        #         image_moving=matched_dapi_img_moving_warped_high_res,
-        #         boxes=transformed_poorly_aligned_regions,
-        #         output_file_path=self._poor_regions_dir / "dapi_high_res",
-        #     )
-
-        #     image_utils.save_good_region_control_overlay(
-        #         image_fixed=matched_dapi_img_fixed_high_res,
-        #         image_moving=matched_dapi_img_moving_warped_high_res,
-        #         boxes=transformed_poorly_aligned_regions,
-        #         output_file_path=self._poor_regions_dir / "dapi_high_res",
-        #         ssim_threshold=0.8,
-        #         max_attempts=100,
-        #     )
+        sys.exit(0)

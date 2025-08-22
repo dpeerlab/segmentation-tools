@@ -1,94 +1,93 @@
-from skimage.metrics import structural_similarity as ssim
 import numpy as np
-from shapely.geometry import box
-from shapely.ops import unary_union
-
-from skimage.measure import label, regionprops
-import matplotlib as mpl
+import cupy as cp
+import tqdm
+from cucim.skimage.metrics import structural_similarity as cucim_ssim
 import matplotlib.pyplot as plt
-from segmentation_tools.logger import logger
+from typing import Tuple
+import os
 
+def compute_ssim_tile_heatmap(
+    fixed_image: np.ndarray,
+    moving_image: np.ndarray,
+    tile_size: int = 512,
+    overlap: int = 64,
+    threshold: float = 0.1,
+    save_img_dir: os.PathLike = None,
+    prefix: str = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute a full-resolution SSIM map and an upsampled per-tile SSIM heatmap.
 
-def find_poorly_aligned_regions(
-    fixed_img,
-    moving_img,
-    ssim_bounds=(0.0, 0.6),
-    win_size=11,
-    min_brightness_factor=0.15,
-    min_area_factor=5e-5,
-    output_file_path=None,
-):
-
-    _, ssim_full = ssim(
-        fixed_img,
-        moving_img,
-        data_range=fixed_img.max() - moving_img.min(),
-        full=True,
-        win_size=win_size,
-    )
-    min_brightness = min(fixed_img.max(), moving_img.max()) * min_brightness_factor
-
-    masked = np.where(
-        (ssim_full >= ssim_bounds[0]) & (ssim_full <= ssim_bounds[1]), 1, 0
-    ).astype(np.uint8)
-
-    # Only keep values where both warped_if_ds and xenium_dapi_ds >= 50
-    condition = (fixed_img >= min_brightness) | (moving_img >= min_brightness)
-
-    # Set masked = 1 only where it was already 1 and condition is met
-    masked_conditioned = masked & condition
-
-    # Generate labeled regions
-    labeled_mask = label(masked_conditioned, connectivity=2)
-    regions = regionprops(labeled_mask)
-
-    min_area_threshold = (
-        min_area_factor * masked_conditioned.shape[0] * masked_conditioned.shape[1]
-    )
-    filtered_regions = [r for r in regions if r.area >= min_area_threshold]
-
-    # Step 1: Convert bounding boxes to shapely rectangles
-    bounding_boxes = []
-    for r in filtered_regions:
-        minr, minc, maxr, maxc = r.bbox
-        bounding_boxes.append(box(minc, minr, maxc, maxr))  # note x/y reversal
-
-    # Step 2: Merge overlapping or touching boxes using shapely
-    buffer_distance = min_area_threshold / 5
-
-    # Expand each box by 100 pixels
-    expanded_boxes = [b.buffer(buffer_distance) for b in bounding_boxes]
-
-    # Merge overlapping/touching buffered boxes
-    merged = unary_union(expanded_boxes)
-
-    # Optional: shrink boxes back to original size (i.e., remove the buffer)
-    if merged.geom_type == "Polygon":
-        merged_boxes = [merged.buffer(-buffer_distance)]
+    Returns:
+        full_ssim_map (np.ndarray): (H, W) SSIM map per pixel.
+        heatmap_upsampled (np.ndarray): (H, W) map of per-tile mean SSIM scores, upsampled via nearest-neighbor.
+    """
+    if type(fixed_image) is np.ndarray:
+        fixed_image_gpu = cp.asarray(fixed_image, dtype=cp.float32)
+        moving_img_gpu = cp.asarray(moving_image, dtype=cp.float32)
     else:
-        merged_boxes = [g.buffer(-buffer_distance) for g in merged.geoms]
+        fixed_image_gpu = fixed_image
+        moving_img_gpu = moving_image
 
-    # Step 4: Plot merged boxes
-    fig, ax = plt.subplots(figsize=(10, 10))
-    ax.imshow(masked_conditioned, cmap="gray")
+    fixed_image_gpu = cp.where(fixed_image_gpu > threshold, fixed_image_gpu, 0)
+    moving_img_gpu = cp.where(moving_img_gpu > threshold, moving_img_gpu, 0)
 
-    for poly in merged_boxes:
-        minx, miny, maxx, maxy = poly.bounds
-        rect = mpl.patches.Rectangle(
-            (minx, miny),
-            maxx - minx,
-            maxy - miny,
-            fill=False,
-            edgecolor="lime",
-            linewidth=2,
-        )
-        ax.add_patch(rect)
+    rows, cols = fixed_image_gpu.shape
+    full_ssim_map = cp.zeros_like(fixed_image_gpu, dtype=cp.float32)
 
-    ax.set_title("Merged Bounding Boxes")
-    plt.axis("off")
+    step_y, step_x = tile_size - overlap, tile_size - overlap
+    total_tiles_y = (rows + step_y - 1) // step_y
+    total_tiles_x = (cols + step_x - 1) // step_x
 
-    if output_file_path:
-        fig.savefig(output_file_path, dpi=300, bbox_inches="tight")
-        plt.close(fig)
-        logger.info(f"Poorly aligned regions saved to: {output_file_path}")
-    return merged_boxes
+    tile_heatmap_gpu = cp.zeros((total_tiles_y, total_tiles_x), dtype=cp.float32)
+
+    pbar = tqdm.tqdm(total=total_tiles_y * total_tiles_x, desc="Calculating SSIM Tiles")
+    for tile_y, i in enumerate(range(0, rows, step_y)):
+        for tile_x, j in enumerate(range(0, cols, step_x)):
+            r_min, r_max = i, min(i + tile_size, rows)
+            c_min, c_max = j, min(j + tile_size, cols)
+
+            ref_tile = fixed_image_gpu[r_min:r_max, c_min:c_max]
+            moving_tile = moving_img_gpu[r_min:r_max, c_min:c_max]
+
+            try:
+                score, ssim_map_tile = cucim_ssim(
+                    ref_tile, moving_tile, full=True, data_range=1.0
+                )
+                full_ssim_map[r_min:r_max, c_min:c_max] = ssim_map_tile
+                tile_heatmap_gpu[tile_y, tile_x] = score
+                # tile_heatmap_normalized_gpu = tile_heatmap_gpu[tile_y, tile_x] / cp.sum(ref_tile + moving_tile)
+            except Exception as e:
+                print(f"Error processing tile at ({i}, {j}): {e}")
+                full_ssim_map[r_min:r_max, c_min:c_max] = 0.0
+                tile_heatmap_gpu[tile_y, tile_x] = 0.0
+                # tile_heatmap_normalized_gpu[tile_y, tile_x] = 0.0
+
+            pbar.update(1)
+    pbar.close()
+
+    # Nearest-neighbor upsample on GPU
+    heatmap_upsampled_gpu = cp.repeat(cp.repeat(tile_heatmap_gpu, step_y, axis=0), step_x, axis=1)
+    heatmap_upsampled_gpu = heatmap_upsampled_gpu[:rows, :cols]
+
+    # heatmap_upsampled_normalized_gpu = cp.repeat(cp.repeat(tile_heatmap_normalized_gpu, step_y, axis=0), step_x, axis=1)
+    # heatmap_upsampled_normalized_gpu = heatmap_upsampled_normalized_gpu[:rows, :cols]
+
+    # Move to CPU
+    full_ssim_map_cpu = cp.asnumpy(full_ssim_map)
+    heatmap_upsampled_cpu = cp.asnumpy(heatmap_upsampled_gpu)
+    # heatmap_upsampled_normalized_cpu = cp.asnumpy(heatmap_upsampled_normalized_gpu)
+
+    if save_img_dir:
+        ssim_full_name = "ssim_full.png"
+        ssim_heatmap_name = "ssim_heatmap.png"
+
+        if prefix:
+            ssim_full_name = f"{prefix}_{ssim_full_name}"
+            ssim_heatmap_name = f"{prefix}_{ssim_heatmap_name}"
+
+        plt.imsave(os.path.join(save_img_dir, ssim_full_name), full_ssim_map_cpu, cmap="gray")
+        plt.imsave(os.path.join(save_img_dir, ssim_heatmap_name), heatmap_upsampled_cpu, cmap="hot")
+
+
+    return full_ssim_map_cpu, heatmap_upsampled_cpu,

@@ -3,6 +3,7 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import cv2
+import cupy as cp
 import matplotlib.pyplot as plt
 import numpy as np
 import tifffile
@@ -161,15 +162,15 @@ def _generate_img_variants(image: np.ndarray):
 
 
 def _score_variant(
-    variant_img, name, pre_matrix, fxd_img, save_img_dir=None, draw_matches=False
+    variant_img, name, pre_matrix, fixed_image, save_img_dir=None, draw_matches=False
 ):
     try:
-        fxd_img = img_as_ubyte(fxd_img)
+        fixed_image = img_as_ubyte(fixed_image)
         variant_img = img_as_ubyte(variant_img)
 
         save_path = f"{os.path.join(save_img_dir, name)}.png" if save_img_dir else None
         H = get_SIFT_homography(
-            img_fxd=fxd_img,
+            img_fxd=fixed_image,
             img_mvg=variant_img,
             save_img_path=save_path,
             draw_matches=draw_matches,
@@ -178,11 +179,11 @@ def _score_variant(
         aligned = warp(
             variant_img,
             inverse_map=H.inverse,
-            output_shape=fxd_img.shape,
+            output_shape=fixed_image.shape,
             preserve_range=True,
         )
 
-        score = ssim(fxd_img, aligned, data_range=aligned.max() - aligned.min())
+        score = ssim(fixed_image, aligned, data_range=aligned.max() - aligned.min())
         combined_matrix = H.params @ pre_matrix
         logger.info(f"Variant: {name}, Score: {score:.4f}")
         return (score, name, combined_matrix)
@@ -192,11 +193,11 @@ def _score_variant(
         return (-1, name, None)  # Failed variant
 
 
-def find_best_sift(mvg_img, fxd_img, save_img_dir=None, draw_matches=False):
-    mvg_img = img_as_ubyte(mvg_img)
-    fxd_img = img_as_ubyte(fxd_img)
+def find_best_sift(moving_image, fixed_image, save_img_dir=None, draw_matches=False):
+    moving_image = img_as_ubyte(moving_image)
+    fixed_image = img_as_ubyte(fixed_image)
 
-    variants = _generate_img_variants(mvg_img)
+    variants = _generate_img_variants(moving_image)
 
     with ProcessPoolExecutor() as executor:
         futures = [
@@ -205,7 +206,7 @@ def find_best_sift(mvg_img, fxd_img, save_img_dir=None, draw_matches=False):
                 variant_img,
                 name,
                 pre_matrix,
-                fxd_img,
+                fixed_image,
                 save_img_dir,
                 draw_matches,
             )
