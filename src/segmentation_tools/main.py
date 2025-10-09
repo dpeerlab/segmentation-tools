@@ -1,12 +1,13 @@
 import sys
 from argparse import ArgumentParser
-from icecream import install
+from icecream import install, ic
 
 from segmentation_tools.pipelines import AlignmentPipeline, SegmentationPipeline
 
 
 def main():
     # Install icecream for debugging
+    ic.configureOutput(includeContext=True)
     install()
     # Set up argument parser
     parser = ArgumentParser(description="Segmentation CLI")

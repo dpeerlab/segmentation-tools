@@ -8,8 +8,8 @@ from segmentation_tools.logger import logger
 
 
 def run_mirage(
-    moving_img,
-    fixed_img,
+    moving_image,
+    fixed_image,
     bin_mask=None,
     pad=12,
     offset=12,
@@ -23,8 +23,8 @@ def run_mirage(
     Run MIRAGE alignment on the given images.
 
     Parameters:
-        moving_img: The moving image to align.
-        fixed_img: The fixed image to align against.
+        moving_image: The moving image to align.
+        fixed_image: The fixed image to align against.
         bin_mask: Optional binary mask for the moving image.
         pad: Padding for the model.
         offset: Offset for the model.
@@ -40,8 +40,8 @@ def run_mirage(
     logger.info("Running MIRAGE alignment...")
 
     mirage_model = mirage.MIRAGE(
-        images=moving_img,
-        references=fixed_img,
+        images=moving_image,
+        references=fixed_image,
         bin_mask=bin_mask,
         pad=pad,
         offset=offset,
@@ -63,7 +63,7 @@ def run_mirage(
         return None
 
     logger.info("Applying transform to moving image...")
-    aligned_image = mirage_model.apply_transform(moving_img)
+    aligned_image = mirage_model.apply_transform(moving_image)
     logger.info("MIRAGE image alignment complete.")
 
     if save_img_dir:
