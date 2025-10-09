@@ -9,7 +9,6 @@ import tifffile
 from pydantic import BaseModel, Field, PrivateAttr, validator
 from pprint import pprint
 
-
 import segmentation_tools.utils.sift_alignment_utils as sift_alignment_utils
 import segmentation_tools.utils.image_utils as image_utils
 import segmentation_tools.utils.convert_image_utils as convert_utils
@@ -142,7 +141,7 @@ class AlignmentPipeline(BaseModel):
 
         logger.info(f"Normalized fixed, {normalized_fixed_dapi.max()=}")
 
-        matched_moving_dapi, matched_fixed_dapi = image_utils.match_image_histograms(
+        matched_moving_dapi, matched_fixed_dapi = image_utils.match_image_histograms_xenium(
             normalized_moving_dapi,
             normalized_fixed_dapi,
         )
@@ -150,12 +149,10 @@ class AlignmentPipeline(BaseModel):
         logger.info("Matched moving and fixed images")
 
         self._garbage_collect_objects(
-            [
                 dapi_img_moving,
                 dapi_img_fixed,
                 normalized_moving_dapi,
                 normalized_fixed_dapi,
-            ]
         )
 
         return matched_moving_dapi, matched_fixed_dapi
@@ -222,10 +219,10 @@ class AlignmentPipeline(BaseModel):
         return tm_combined
 
 
-    def _find_poorly_aligned_regions(self, fixed_img, moving_img, sift_level_fixed):
+    def _find_poorly_aligned_regions(self, fixed_image, moving_image, sift_level_fixed):
         poorly_aligned_regions = poor_alignment_utils.find_poorly_aligned_regions(
-            fixed_img=fixed_img,
-            moving_img=moving_img,
+            fixed_image=fixed_image,
+            moving_image=moving_image,
             win_size=11,
             min_brightness_factor=0.15,
             min_area_factor=5e-5,
@@ -256,12 +253,18 @@ class AlignmentPipeline(BaseModel):
         nuclei_channel_moving,
         apply_mirage_correction=False,
     ):
+
+        apply_mirage_correction = True # TODO: why does passing in False not work?
         num_moving_channels = image_utils.get_num_channels(
             tiff_file=moving_file, series=series_moving, level=high_res_level
         )
 
         warped_channels = []
         for channel_idx in range(num_moving_channels):
+
+            if channel_idx != nuclei_channel_moving: ## TODO: REMOVE!
+                continue
+
             img_moving = tifffile.imread(
                 moving_file,
                 series=series_moving,
@@ -282,8 +285,10 @@ class AlignmentPipeline(BaseModel):
                 tm_combined,
                 output_shape=matched_fixed.shape,
                 preserve_range=True,
-                order=5,
+                order = 3,
             )
+
+            self._garbage_collect_objects(warped)
 
             logger.info(f"Warped channel {channel_idx} at high resolution")
 
@@ -296,9 +301,10 @@ class AlignmentPipeline(BaseModel):
                 )
 
                 if apply_mirage_correction:
+                    ic(apply_mirage_correction)
                     warped = mirage_utils.run_mirage(
-                        moving_img=warped,
-                        fixed_img=matched_fixed,
+                        moving_image=warped,
+                        fixed_image=matched_fixed,
                         save_img_dir=self._processed_tiff_dir,
                     )
 
@@ -313,7 +319,9 @@ class AlignmentPipeline(BaseModel):
     def _garbage_collect_objects(self, *objects):
         for obj in objects:
             del obj
+
         gc.collect()
+        return
 
     ### RUN FUNCTIONS ###
     def run(self):
@@ -344,6 +352,8 @@ class AlignmentPipeline(BaseModel):
                 min_size=1500,  # Minimum size for downsampled images
             )
         )
+
+        sift_level_moving, sift_level_fixed = (2,2)
 
         logger.info(
             f"Determined downsampled levels for alignment: moving={sift_level_moving}, fixed={sift_level_fixed}"
@@ -391,8 +401,8 @@ class AlignmentPipeline(BaseModel):
         # if self.find_poorly_aligned_regions:
         #     logger.info("Finding poorly aligned regions")
         #     poorly_aligned_regions, transformed_poorly_aligned_regions = self._find_poorly_aligned_regions(
-        #         fixed_img=matched_fixed_dapi_ds,
-        #         moving_img=matched_warped_moving_dapi_ds,
+        #         fixed_image=matched_fixed_dapi_ds,
+        #         moving_image=matched_warped_moving_dapi_ds,
         #         sift_level_fixed=sift_level_fixed,
         #     )
 
@@ -405,11 +415,9 @@ class AlignmentPipeline(BaseModel):
 
         # Free memory
         self._garbage_collect_objects(
-            [
                 matched_moving_dapi_ds,
                 matched_fixed_dapi_ds,
                 matched_warped_moving_dapi_ds,
-            ]
         )
 
         # Step 7: Load high resolution images
