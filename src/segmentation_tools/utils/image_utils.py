@@ -19,127 +19,55 @@ import cv2
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from segmentation_tools.logger import logger
+from loguru import logger
 
 def normalize(
-        img: np.ndarray,
-        quantiles: list = [0.001, 0.999],
+    img: np.ndarray,
+    quantiles: list = [0.001, 0.999],
+    clahe_clip_limit: float = 1.0,
+    clahe_tile_grid_size: tuple[int, int] = (20, 20),
+    return_float: bool = True,
 ) -> np.ndarray:
-    # 1. Quantile Clipping and Scaling (Non-Redundant Step)
-    # This cleans up outliers before CLAHE is applied.
+    """
+    Normalize an image by clipping intensities to given quantiles and applying CLAHE.
+    If image is RGB, applies normalization to each channel independently without CLAHE.
+    """
+    if img.ndim == 3 and img.shape[-1] == 3:
+        # Normalize each channel separately, no CLAHE
+        norm_channels = [
+            normalize(
+                img[..., c],
+                quantiles,
+                clahe_clip_limit,
+                clahe_tile_grid_size,
+                return_float,
+            )
+            for c in range(3)
+        ]
+        return np.stack(norm_channels, axis=-1)
+
+    # 1. Clip intensities to quantiles
     lo, hi = np.quantile(img, quantiles)
-    img_clipped = np.clip(img, lo, hi)
-    
-    # Scale to [0, 1] float, which is ideal input for skimage CLAHE
+    img = np.clip(img, lo, hi)
+
+    # 2. Scale to [0, 1]
     if hi - lo < 1e-6:
-        img_normalized = np.zeros_like(img_clipped, dtype=np.float32)
+        img = np.zeros_like(img)
     else:
-        img_normalized = (img_clipped - lo) / (hi - lo)
-        
-    img_normalized = np.nan_to_num(img_normalized)
-    if img_normalized.max() > 255.0:
-        img_normalized /= 65535.0
-    elif img_normalized.max() > 1.0:
-        img_normalized /= 255.0
+        img = (img - lo) / (hi - lo)
 
-    img_normalized = np.clip(img_normalized, 0, 1).astype(np.float32)
-    return img_normalized
+    # 3. Clean and convert
+    img = np.nan_to_num(img, nan=0.0, posinf=1.0, neginf=0.0)
+    img = np.clip(img, 0, 1)
+    img_uint16 = img_as_uint(img)
 
+    # 4. CLAHE in uint16
+    clahe = cv2.createCLAHE(
+        clipLimit=clahe_clip_limit, tileGridSize=clahe_tile_grid_size
+    )
+    img_clahe = clahe.apply(img_uint16)
 
-# def normalize(
-#     img: np.ndarray,
-#     quantiles: list = [0.001, 0.999],
-#     clahe_clip_limit: float = 1.0,
-#     clahe_tile_grid_size: tuple[int, int] = (20, 20),
-#     return_float: bool = True,
-# ) -> np.ndarray:
-
-#     """
-#     Normalize an image by clipping intensities to given quantiles and applying CLAHE.
-#     If image is RGB, applies normalization to each channel independently without CLAHE.
-#     """
-#     if img.ndim == 3 and img.shape[-1] == 3:
-#         # Normalize each channel separately, no CLAHE
-#         norm_channels = [
-#             normalize(
-#                 img[..., c],
-#                 quantiles,
-#                 clahe_clip_limit,
-#                 clahe_tile_grid_size,
-#                 return_float,
-#             )
-#             for c in range(3)
-#         ]
-#         return np.stack(norm_channels, axis=-1)
-
-#     # 1. Clip intensities to quantiles
-#     lo, hi = np.quantile(img, quantiles)
-#     img = np.clip(img, lo, hi)
-
-#     # 2. Scale to [0, 1]
-#     if hi - lo < 1e-6:
-#         img = np.zeros_like(img)
-#     else:
-#         img = (img - lo) / (hi - lo)
-
-#     # 3. Clean and convert
-#     img = np.nan_to_num(img, nan=0.0, posinf=1.0, neginf=0.0)
-#     img = np.clip(img, 0, 1)
-#     img_uint16 = img_as_uint(img)
-
-#     # 4. CLAHE in uint16
-#     clahe = cv2.createCLAHE(
-#         clipLimit=clahe_clip_limit, tileGridSize=clahe_tile_grid_size
-#     )
-#     img_clahe = clahe.apply(img_uint16)
-
-#     if return_float:
-#         return img_clahe.astype(np.float32) / 65535.0
-#     else:
-#         return img_as_ubyte(img_clahe / 65535.0)
-
-
-# def normalize(
-#     img: np.ndarray,
-#     clahe_clip_limit: float = 0.01,          # skimage uses [0,1], not OpenCV’s ~1-40
-#     clahe_tile_grid_size: tuple[int, int] = (20, 20),
-#     return_float: bool = True,
-# ) -> np.ndarray:
-#     """
-#     Normalize an image using adaptive histogram equalization (CLAHE) with skimage.
-#     If image is RGB, applies normalization to each channel independently.
-#     """
-#     if img.ndim == 3 and img.shape[-1] == 3:
-#         logger.info("Shouldn't be here?")
-#         # Apply per-channel
-#         norm_channels = [
-#             normalize(
-#                 img[..., c],
-#                 clahe_clip_limit,
-#                 clahe_tile_grid_size,
-#                 return_float,
-#             )
-#             for c in range(3)
-#         ]
-#         return np.stack(norm_channels, axis=-1)
-
-#     # Ensure float in [0,1]
-#     img = img_as_float(img)
-#     img = np.nan_to_num(img, nan=0.0, posinf=1.0, neginf=0.0)
-#     img = np.clip(img, 0, 1)
-
-#     # Apply skimage CLAHE
-#     img_eq = equalize_adapthist(
-#         img,
-#         clip_limit=clahe_clip_limit,
-#         kernel_size=clahe_tile_grid_size
-#     )
-
-#     if return_float:
-#         return img_eq.astype(np.float32)
-#     else:
-#         return (img_eq * 255).astype(np.uint8)
-
+    return img_clahe.astype(np.float32) / 65535.0
 
 def create_rgb_overlay(fixed, moving):
     fixed = fixed.astype(np.float32)

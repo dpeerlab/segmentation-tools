@@ -1,13 +1,17 @@
 import sys
 from argparse import ArgumentParser
 from icecream import install, ic
+import datetime
 
 from segmentation_tools.pipelines import AlignmentPipeline, SegmentationPipeline
 
+# Define a function to generate the timestamp prefix
+def time_format():
+    return f'{datetime.now().strftime("%H:%M:%S.%f")} | '
 
 def main():
     # Install icecream for debugging
-    ic.configureOutput(includeContext=True)
+    ic.configureOutput(prefix=time_format, includeContext=True)
     install()
     # Set up argument parser
     parser = ArgumentParser(description="Segmentation CLI")

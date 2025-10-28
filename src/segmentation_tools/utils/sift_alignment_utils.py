@@ -11,7 +11,7 @@ from skimage import img_as_ubyte
 from skimage.metrics import structural_similarity as ssim
 from skimage.transform import AffineTransform, ProjectiveTransform, warp
 
-from segmentation_tools.logger import logger
+from loguru import logger
 
 
 def get_best_common_level(

@@ -6,7 +6,7 @@ from shapely.ops import unary_union
 from skimage.measure import label, regionprops
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-from segmentation_tools.logger import logger
+from loguru import logger
 
 
 def find_poorly_aligned_regions(
