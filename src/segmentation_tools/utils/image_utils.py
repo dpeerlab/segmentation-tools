@@ -7,85 +7,37 @@ import matplotlib.pyplot as plt
 import numpy as np
 import tifffile
 
-from skimage.util import img_as_ubyte, img_as_float
+from skimage.util import img_as_ubyte, img_as_uint
 from skimage.exposure import match_histograms, equalize_adapthist, rescale_intensity
 from skimage.metrics import structural_similarity as ssim
 from skimage.transform import resize
 from shapely.geometry import box as shapely_box
+from numpy.typing import ArrayLike
+
+from skimage.util import img_as_ubyte, img_as_uint
+import cv2
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from segmentation_tools.logger import logger
-
-
-# def normalize(
-#     img: np.ndarray,
-#     quantiles: ArrayLike = [0.001, 0.999],
-#     clahe_clip_limit: float = 1.0,
-#     clahe_tile_grid_size: tuple[int, int] = (20, 20),
-#     return_float: bool = True,
-# ) -> np.ndarray:
-#     """
-#     Normalize an image by clipping intensities to given quantiles and applying CLAHE.
-#     If image is RGB, applies normalization to each channel independently without CLAHE.
-#     """
-#     if img.ndim == 3 and img.shape[-1] == 3:
-#         # Normalize each channel separately, no CLAHE
-#         norm_channels = [
-#             normalize(
-#                 img[..., c],
-#                 quantiles,
-#                 clahe_clip_limit,
-#                 clahe_tile_grid_size,
-#                 return_float,
-#             )
-#             for c in range(3)
-#         ]
-#         return np.stack(norm_channels, axis=-1)
-
-#     # 1. Clip intensities to quantiles
-#     lo, hi = np.quantile(img, quantiles)
-#     img = np.clip(img, lo, hi)
-
-#     # 2. Scale to [0, 1]
-#     if hi - lo < 1e-6:
-#         img = np.zeros_like(img)
-#     else:
-#         img = (img - lo) / (hi - lo)
-
-#     # 3. Clean and convert
-#     img = np.nan_to_num(img, nan=0.0, posinf=1.0, neginf=0.0)
-#     img = np.clip(img, 0, 1)
-#     img_uint16 = img_as_uint(img)
-
-#     # 4. CLAHE in uint16
-#     clahe = cv2.createCLAHE(
-#         clipLimit=clahe_clip_limit, tileGridSize=clahe_tile_grid_size
-#     )
-#     img_clahe = clahe.apply(img_uint16)
-
-#     if return_float:
-#         return img_clahe.astype(np.float32) / 65535.0
-#     else:
-#         return img_as_ubyte(img_clahe / 65535.0)
-
+from loguru import logger
 
 def normalize(
     img: np.ndarray,
-    clahe_clip_limit: float = 0.01,          # skimage uses [0,1], not OpenCV’s ~1-40
+    quantiles: list = [0.001, 0.999],
+    clahe_clip_limit: float = 1.0,
     clahe_tile_grid_size: tuple[int, int] = (20, 20),
     return_float: bool = True,
 ) -> np.ndarray:
     """
-    Normalize an image using adaptive histogram equalization (CLAHE) with skimage.
-    If image is RGB, applies normalization to each channel independently.
+    Normalize an image by clipping intensities to given quantiles and applying CLAHE.
+    If image is RGB, applies normalization to each channel independently without CLAHE.
     """
     if img.ndim == 3 and img.shape[-1] == 3:
-        logger.info("Shouldn't be here?")
-        # Apply per-channel
+        # Normalize each channel separately, no CLAHE
         norm_channels = [
             normalize(
                 img[..., c],
+                quantiles,
                 clahe_clip_limit,
                 clahe_tile_grid_size,
                 return_float,
@@ -94,23 +46,28 @@ def normalize(
         ]
         return np.stack(norm_channels, axis=-1)
 
-    # Ensure float in [0,1]
-    img = img_as_float(img)
+    # 1. Clip intensities to quantiles
+    lo, hi = np.quantile(img, quantiles)
+    img = np.clip(img, lo, hi)
+
+    # 2. Scale to [0, 1]
+    if hi - lo < 1e-6:
+        img = np.zeros_like(img)
+    else:
+        img = (img - lo) / (hi - lo)
+
+    # 3. Clean and convert
     img = np.nan_to_num(img, nan=0.0, posinf=1.0, neginf=0.0)
     img = np.clip(img, 0, 1)
+    img_uint16 = img_as_uint(img)
 
-    # Apply skimage CLAHE
-    img_eq = equalize_adapthist(
-        img,
-        clip_limit=clahe_clip_limit,
-        kernel_size=clahe_tile_grid_size
+    # 4. CLAHE in uint16
+    clahe = cv2.createCLAHE(
+        clipLimit=clahe_clip_limit, tileGridSize=clahe_tile_grid_size
     )
+    img_clahe = clahe.apply(img_uint16)
 
-    if return_float:
-        return img_eq.astype(np.float32)
-    else:
-        return (img_eq * 255).astype(np.uint8)
-
+    return img_clahe.astype(np.float32) / 65535.0
 
 def create_rgb_overlay(fixed, moving):
     fixed = fixed.astype(np.float32)
@@ -355,29 +312,43 @@ def save_image(
     description: str = "",
 ) -> None:
     """
-    Save an image to a TIFF file with proper type handling and logging.
+    Saves an image to a TIFF file, preserving fidelity by handling
+    different data ranges and types correctly.
 
     Args:
-        image (np.ndarray): Image to save. Can be float [0,1], float [0,255], or uint8.
+        image (np.ndarray): The image array. Expected to be in one of the
+                            following ranges: [0, 1], [0, 255], or [0, 65535].
         output_file_path (str): Destination path for the TIFF file.
         description (str): Optional description for logging.
-
-    Returns:
-        None
     """
+    processed_image = image
 
+    # Handle floating-point data by scaling to the appropriate integer range
     if np.issubdtype(image.dtype, np.floating):
-        if image.max() <= 1.0:
-            image = img_as_ubyte(np.clip(image, 0, 1))  # safe float-to-uint8 scaling
-        else:
-            # assume already in 0–255 float, just clip and cast
-            image = np.clip(image, 0, 255).astype(np.uint8)
-    elif image.dtype != np.uint8:
-        image = image.astype(np.uint8)
+        image_max = image.max()
+        
+        # Case 1: Normalized float [0, 1]
+        if image_max <= 1.0:
+            # Scale to 16-bit (uint16) to maximize precision
+            # This is safer than scaling to 8-bit, as it preserves more information
+            processed_image = np.clip(image, 0, 1) * 65535
+            processed_image = processed_image.astype(np.uint16)
 
-    tifffile.imwrite(output_file_path, image)
+        # Case 2: Float in [0, 255] or [0, 65535] range
+        elif image_max <= 255.0:
+            processed_image = np.clip(image, 0, 255).astype(np.uint8)
+        else: # Assumes float in [0, 65535] or larger range
+            processed_image = np.clip(image, 0, 65535).astype(np.uint16)
+
+    # For integer data, no scaling is needed, as tifffile handles it correctly
+    # The image is saved with its original integer dtype (e.g., uint8, uint16)
+
+    # Save the processed image using tifffile
+    tifffile.imwrite(output_file_path, processed_image)
+    
     logger.info(
-        f"{description} image saved to: {output_file_path} with shape {image.shape} and dtype {image.dtype}"
+        f"{description} image saved to: {output_file_path} "
+        f"with shape {processed_image.shape} and dtype {processed_image.dtype}"
     )
     return
 
@@ -391,34 +362,21 @@ def calculate_shannon_entropy(image):
     return -np.sum(hist * np.log2(hist))
 
 
-def match_image_histograms(img1, img2):
-    entropy_one = calculate_shannon_entropy(img1)
-    logger.info(f"Entropy one, {entropy_one}")
-    entropy_two = calculate_shannon_entropy(img2)
-    logger.info(f"Entropy two, {entropy_two}")
+def match_moving_to_fixed(moving, fixed, background_cutoff = 0.15):
+    moving = np.where(moving < background_cutoff, 0, moving)
+    fixed = np.where(fixed < background_cutoff, 0, fixed)
 
-    # Histogram match using float32 for better accuracy
-    img1 = img1.astype(np.float32)
-    img2 = img2.astype(np.float32)
-    
-    if entropy_one > entropy_two:
-        logger.info("Matching histograms")
-        img1 = match_histograms(img1, img2)
-    else:
-        logger.info("Matching histograms")
-        img2 = match_histograms(img2, img1)
+    moving = moving.astype(np.float32)
+    fixed = fixed.astype(np.float32) 
+    moving = match_histograms(moving, fixed)
 
-    logger.info("Histograms matched")
+    moving = equalize_adapthist(moving, clip_limit=0.01, kernel_size=(20, 20))
+    moving = np.clip(moving, 0, 1)
 
-    img1 = rescale_intensity(img1, in_range="image", out_range=(0,1))
-    logger.info("Rescaling intensity one")
-    img2 = rescale_intensity(img2, in_range="image", out_range=(0,1))
-    logger.info("Rescaling intensity two")
+    fixed = equalize_adapthist(fixed, clip_limit=0.01, kernel_size=(20, 20))
+    fixed = np.clip(fixed, 0, 1)
 
-    img1 = np.nan_to_num(img1, nan=0.0)
-    img2 = np.nan_to_num(img2, nan=0.0)
-
-    return img1.astype(np.float32), img2.astype(np.float32)
+    return moving, fixed
 
 
 def match_image_histograms_local(img1, img2, tile_fraction=0.1, max_workers=8):

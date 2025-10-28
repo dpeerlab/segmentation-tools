@@ -1,3 +1,0 @@
-Processing: /data1/peerd/ghoshr/segmentation_tools/data/sam_data/if/nd2_files/20250430_NP_TT_XeniumRun_4_NakCD45AF555/0033151/Region_4.nd2
-2025-07-22 11:38:58,410 [main] WARN  c.g.bioformats2raw.Converter - Overwriting output path /tmp/tmp.d0LIQ10K4j
-Saved: /data1/peerd/ghoshr/alignment/if_tif_files/0033151_Region_4.tiff
