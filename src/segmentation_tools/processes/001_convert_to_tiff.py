@@ -4,7 +4,7 @@ import sys
 import shutil
 from pathlib import Path
 from typing import Union
-from segmentation_tools.logger import logger
+from loguru import logger
 from segmentation_tools.utils.config import CHECKPOINT_DIR
 import tifffile
 
@@ -30,6 +30,7 @@ def convert_file_to_tiff(input_file_path: Path, output_file_path: Path):
     """Convert a single microscopy image to TIFF using bioformats2raw and raw2ometiff."""
     if _is_tiff_file(input_file_path):
         logger.info(f"Skipping conversion: {input_file_path.name} is already a TIFF.")
+        logger.info(f"Copying {input_file_path} to {output_file_path}")
         shutil.copy(input_file_path, output_file_path)
         return
 
@@ -92,19 +93,16 @@ def convert_file_to_tiff(input_file_path: Path, output_file_path: Path):
 
 if __name__ == "__main__":
     if len(sys.argv) != 4:
-        print("Usage: python tiff_converter.py <input_path> <output_root> <fixed_or_moving>")
+        print(len(sys.argv))
+        print(sys.argv)
+        print("Usage: python tiff_converter.py <input_path> <output_root> <prefix>")
         sys.exit(1)
 
     input_file_path = sys.argv[1]
     output_root = sys.argv[2]
-    fixed_or_moving = sys.argv[3]
+    prefix = sys.argv[3]
 
-    if fixed_or_moving not in ["fixed", "moving"]:
-        logger.error("Third argument must be 'fixed' or 'moving'")
-        sys.exit(1)
-
-    output_file_name = f"{CHECKPOINT_DIR}/{fixed_or_moving}.tiff"
-
+    output_file_name = f"{CHECKPOINT_DIR}/{prefix}.tiff"
     try:
         convert_file_to_tiff(
             input_file_path=Path(input_file_path),
@@ -113,7 +111,7 @@ if __name__ == "__main__":
         logger.info("Conversion pipeline complete.")
     except Exception as e:
         logger.error(
-            "Usage: python tiff_converter.py <input_file_path> <output_root> <fixed_or_moving>"
+            "Usage: python tiff_converter.py <input_file_path> <output_root> <prefix>"
         )
         logger.error(f"An unexpected error occurred in the pipeline: {e}")
         sys.exit(1)

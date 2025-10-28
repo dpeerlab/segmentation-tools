@@ -1,5 +1,6 @@
+from icecream import ic
 from pathlib import Path
-from segmentation_tools.logger import logger
+from loguru import logger
 import segmentation_tools.utils.config as config
 import os
 import shutil
@@ -25,6 +26,7 @@ def main(output_dir_root: Path, job_title: str):
 
 
 if __name__ == "__main__":
+    ic(sys.argv, len(sys.argv))
 
     if len(sys.argv) != 3:
         logger.error("Usage: python setup_directories.py <output_dir> <job_title>")
