@@ -5,7 +5,7 @@ from pathlib import Path
 
 import tifffile
 
-from segmentation_tools.logger import logger
+from loguru import logger
 
 
 def is_tiff_file(file_path: str | Path) -> bool:
