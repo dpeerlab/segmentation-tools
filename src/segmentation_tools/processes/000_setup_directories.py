@@ -1,7 +1,7 @@
 from icecream import ic
 from pathlib import Path
 from loguru import logger
-import segmentation_tools.utils.config as config
+from segmentation_tools.utils.config import CHECKPOINT_DIR_NAME, RESULTS_DIR_NAME
 import os
 import shutil
 import sys
@@ -17,10 +17,10 @@ def main(output_dir_root: Path, job_title: str):
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    results_dir = output_dir / config.RESULTS_DIR_NAME
+    results_dir = output_dir / RESULTS_DIR_NAME
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    checkpoint_dir = output_dir / config.CHECKPOINT_DIR
+    checkpoint_dir = output_dir / CHECKPOINT_DIR_NAME
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     return output_dir, results_dir, checkpoint_dir
 

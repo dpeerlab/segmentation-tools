@@ -5,9 +5,9 @@ import numpy as np
 from pathlib import Path
 import tifffile
 import skimage
-from skimage.filters import threshold_multiotsu
 from skimage.transform import ProjectiveTransform
-from segmentation_tools.utils.image_utils import normalize
+from segmentation_tools.utils import normalize, get_multiotsu_threshold
+from segmentation_tools.utils.config import CHECKPOINT_DIR_NAME, RESULTS_DIR_NAME
 
 
 
@@ -199,11 +199,11 @@ if __name__ == "__main__":
 
     moving_tiff_file_path = sys.argv[1]
     high_res_level = int(sys.argv[2])
-    checkpoint_dir = Path(moving_tiff_file_path).parent.parent / ".checkpoints"
+    checkpoint_dir = Path(moving_tiff_file_path).parent.parent / CHECKPOINT_DIR_NAME
 
     linear_transform_file_path = checkpoint_dir / "linear_transform.npy"
     mirage_transform_file_path = checkpoint_dir / "mirage_transform.npy"
-    results_dir = Path(moving_tiff_file_path).parent.parent / "results"
+    results_dir = Path(moving_tiff_file_path).parent.parent / RESULTS_DIR_NAME
 
     main(
         moving_tiff_file_path=moving_tiff_file_path,
