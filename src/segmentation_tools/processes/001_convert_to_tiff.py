@@ -7,6 +7,7 @@ from typing import Union
 from loguru import logger
 import tifffile
 from segmentation_tools.utils.config import CHECKPOINT_DIR_NAME
+from icecream import ic
 
 
 # --- Internal Helper Functions ---
@@ -102,7 +103,7 @@ if __name__ == "__main__":
     output_root = sys.argv[2]
     prefix = sys.argv[3]
 
-    output_file_name = Path(output_root) / Path(CHECKPOINT_DIR_NAME) / Path(f"{prefix}_converted.tiff")
+    output_file_name = Path(output_root) / Path(CHECKPOINT_DIR_NAME) / Path(f"{prefix}.tiff")
     try:
         convert_file_to_tiff(
             input_file_path=Path(input_file_path),

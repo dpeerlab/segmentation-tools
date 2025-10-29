@@ -6,8 +6,6 @@ import tifffile
 
 from segmentation_tools.utils import normalize, get_multiotsu_threshold
 
-
-
 def load_image(input_file_path: Path, channel: int, level: int):
     """Load moving and fixed images from a multi-resolution OME-TIFF file."""
     with tifffile.TiffFile(input_file_path) as tif:
@@ -26,15 +24,16 @@ def load_image(input_file_path: Path, channel: int, level: int):
     return image
 
 
-
-
-
-def main(input_file_path, dapi_channel_moving, level, output_file_path):
+def main(input_file_path, dapi_channel_moving, level, output_file_path, filter):
     dapi_image = load_image(
         input_file_path=input_file_path, channel=dapi_channel_moving, level=level
     )
 
     dapi_image_normalized = normalize(dapi_image)
+    if not filter:
+        np.save(output_file_path, dapi_image_normalized)
+        return
+    
     otsu_threshold_value = get_multiotsu_threshold(image=dapi_image_normalized, num_classes=4)
     logger.info(f"Otsu's threshold: {otsu_threshold_value}")
 
@@ -47,15 +46,17 @@ def main(input_file_path, dapi_channel_moving, level, output_file_path):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 4 and len(sys.argv) != 5:
-        logger.error(
-            "Usage: python preprocess_images.py <input_file_path> <dapi_channel_moving> <fixed_or_moving> [level]"
-        )
-        sys.exit(1)
+    # if len(sys.argv) != 4 and len(sys.argv) != 5:
+    #     logger.error(
+    #         "Usage: python preprocess_images.py <input_file_path> <dapi_channel_moving> <fixed_or_moving> [level]"
+    #     )
+    #     sys.exit(1)
 
     input_file_path = sys.argv[1]
     dapi_channel_moving = int(sys.argv[2])
     fixed_or_moving = sys.argv[3]
+
+    filter = fixed_or_moving == "moving"
 
     checkpoint_dir = Path(input_file_path).parent
     if len(sys.argv) == 5:
@@ -76,4 +77,5 @@ if __name__ == "__main__":
         dapi_channel_moving=dapi_channel_moving,
         level=level,
         output_file_path=output_file_path,
+        filter=filter,
     )
