@@ -5,8 +5,8 @@ import shutil
 from pathlib import Path
 from typing import Union
 from loguru import logger
-from segmentation_tools.utils.config import CHECKPOINT_DIR
 import tifffile
+from segmentation_tools.utils.config import CHECKPOINT_DIR_NAME
 
 
 # --- Internal Helper Functions ---
@@ -102,11 +102,11 @@ if __name__ == "__main__":
     output_root = sys.argv[2]
     prefix = sys.argv[3]
 
-    output_file_name = f"{CHECKPOINT_DIR}/{prefix}.tiff"
+    output_file_name = Path(output_root) / Path(CHECKPOINT_DIR_NAME) / Path(f"{prefix}_converted.tiff")
     try:
         convert_file_to_tiff(
             input_file_path=Path(input_file_path),
-            output_file_path=Path(output_root) / output_file_name,
+            output_file_path=Path(output_file_name),
         )
         logger.info("Conversion pipeline complete.")
     except Exception as e:

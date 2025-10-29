@@ -4,10 +4,8 @@ import sys
 import numpy as np
 import tifffile
 
-from segmentation_tools.utils.image_utils import normalize
-from typing import Union
+from segmentation_tools.utils import normalize, get_multiotsu_threshold
 
-from skimage.filters import threshold_multiotsu
 
 
 def load_image(input_file_path: Path, channel: int, level: int):
@@ -28,21 +26,7 @@ def load_image(input_file_path: Path, channel: int, level: int):
     return image
 
 
-def get_multiotsu_threshold(image: np.ndarray, num_classes: int = 4) -> float:
-    """
-    Computes Otsu's threshold for the given image.
-    Returns None if the image is empty or uniform.
-    """
-    if np.all(image == image.flat[0]):
-        return None
 
-    thresh = threshold_multiotsu(image, classes=num_classes)[0]
-
-    if thresh < 0.05:
-        thresh = threshold_multiotsu(image, classes=num_classes-1)[0]
-    elif thresh > 0.2:
-        thresh = threshold_multiotsu(image, classes=num_classes+1)[0]
-    return thresh
 
 
 def main(input_file_path, dapi_channel_moving, level, output_file_path):
