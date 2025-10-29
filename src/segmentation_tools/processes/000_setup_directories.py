@@ -26,8 +26,6 @@ def main(output_dir_root: Path, job_title: str):
 
 
 if __name__ == "__main__":
-    ic(sys.argv, len(sys.argv))
-
     if len(sys.argv) != 3:
         logger.error("Usage: python setup_directories.py <output_dir> <job_title>")
         sys.exit(1)

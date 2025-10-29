@@ -50,18 +50,16 @@ def run_mirage(
         num_layers=num_layers,
         pool=pool,
         loss=loss,
+        batch_size=batch_size,
+        LR=lr,
     )
 
     logger.info("Training MIRAGE model...")
-    try:
-        mirage_model.train(batch_size=256, num_steps=2048, lr__sched=True, LR=0.001)
+    mirage_model.train(num_steps=num_steps)
 
-        logger.info("MIRAGE model training complete. Computing transform...")
+    logger.info("MIRAGE model training complete. Computing transform...")
 
-        mirage_model.compute_transform()
-    except Exception as e:
-        logger.error(f"Error computing transform: {e}")
-        return None
+    mirage_model.compute_transform()
 
     return mirage_model.get_transform()
 
