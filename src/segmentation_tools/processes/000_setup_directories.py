@@ -5,6 +5,30 @@ from segmentation_tools.utils.config import CHECKPOINT_DIR_NAME, RESULTS_DIR_NAM
 import os
 import shutil
 import sys
+import argparse
+
+
+def parse_arguments():
+    """Parses command-line arguments using argparse."""
+    parser = argparse.ArgumentParser(
+        description="Set up output directories for segmentation tools."
+    )
+
+    # Define the arguments as named flags
+    parser.add_argument(
+        "--output-root",
+        required=True,
+        type=str,
+        help="The root directory where the output file will be saved.",
+    )
+    parser.add_argument(
+        "--job-title",
+        required=True,
+        type=str,
+        help="The title of the job being processed.",
+    )
+
+    return parser.parse_args()
 
 
 def main(output_dir_root: Path, job_title: str):
@@ -26,12 +50,9 @@ def main(output_dir_root: Path, job_title: str):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        logger.error("Usage: python setup_directories.py <output_dir> <job_title>")
-        sys.exit(1)
-
-    output_dir_root = sys.argv[1]
-    job_title = sys.argv[2]
+    args = parse_arguments()
+    output_dir_root = args.output_root
+    job_title = args.job_title
 
     output_dir, processed_tiff_dir, checkpoint_dir = main(
         output_dir_root=Path(output_dir_root), job_title=job_title

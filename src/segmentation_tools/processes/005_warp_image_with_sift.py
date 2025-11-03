@@ -4,6 +4,7 @@ import numpy as np
 from pathlib import Path
 import skimage
 import tifffile
+import argparse
 
 
 def get_shape_at_level(
@@ -41,22 +42,37 @@ def main(moving_file_path, transform_file_path, checkpoint_dir, fixed_shape):
         output_shape=fixed_shape,
         mode="constant",
     )
-    warped_file_path = checkpoint_dir / f"moving_dapi_warped.npy"
+    warped_file_path = checkpoint_dir / f"moving_dapi_linear_warped.npy"
     np.save(warped_file_path, image_warped)
     logger.info(f"Warped image saved to {warped_file_path}")
     return 0
 
+def parse_arguments():
+    """Parses command-line arguments using argparse."""
+    parser = argparse.ArgumentParser(
+        description="Warp moving image using SIFT-based transform."
+    )
+
+    parser.add_argument(
+        "--moving-file-path",
+        required=True,
+        type=str,
+        help="Path to the moving image .npy file.",
+    )
+    parser.add_argument(
+        "--transform-file-path",
+        required=True,
+        type=str,
+        help="Path to the SIFT transform .npy file.",
+    )
+
+    return parser.parse_args()
 
 if __name__ == "__main__":
-    logger.info("here")
-    if len(sys.argv) != 3:
-        logger.error(
-            "Usage: python 004_warp_image_with_sift.py <moving_file> <transform_file>"
-        )
-        sys.exit(1)
 
-    moving_file_path = sys.argv[1]
-    transform_file_path = sys.argv[2]
+    args = parse_arguments()
+    moving_file_path = args.moving_file_path
+    transform_file_path = args.transform_file_path
     original_fixed_file_path = Path(moving_file_path).parent / "fixed.tiff"
     fixed_shape = get_shape_at_level(original_fixed_file_path, level=0)
     checkpoint_dir = Path(moving_file_path).parent

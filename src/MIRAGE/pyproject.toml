@@ -1,0 +1,25 @@
+[tool.poetry]
+name = "cellmirage"
+version = "0.1.2"
+description = "Efficient and scalable image registration (alignment) for multiplexed imaging data"
+authors = ["Doron Haviv <havivd@mskcc.org>"]
+maintainers = ["Tobias Krause <tobiaspk1@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+packages = [
+    { include = "mirage" }
+]
+
+[tool.poetry.dependencies]
+python = ">=3.9,<3.12"
+numpy = "^1.26.3"
+opencv-python = "^4.9.0.80"
+scikit-image = "^0.22.0"
+tensorflow = "^2.8.4"
+tqdm = "^4.66.1"
+urllib3 = "1.26.6"
+matplotlib = "^3.6"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

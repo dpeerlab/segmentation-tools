@@ -3,6 +3,7 @@ import cv2
 from pathlib import Path
 from typing import Union
 from loguru import logger
+import argparse
 
 import sys
 
@@ -32,11 +33,16 @@ def find_optimal_sift_level_by_keypoints(
         max_level_search,
     )
 
+    min_possible_level = max(
+        0,
+        min_level_search,
+    )
+
     sift = cv2.SIFT_create()
     best_level = 0
 
     # Iterate from a coarse level (highest index) down to Level 0
-    for i in range(max_possible_level, -1, -1):
+    for i in range(max_possible_level, min_possible_level, -1):
 
         # Load the image data for this level
         # Note: tifffile.TiffPage.asarray() loads the image into memory (NumPy)
@@ -57,7 +63,6 @@ def find_optimal_sift_level_by_keypoints(
         img_m = cv2.normalize(img_m, None, 0, 255, cv2.NORM_MINMAX).astype("uint8")
         img_f = cv2.normalize(img_f, None, 0, 255, cv2.NORM_MINMAX).astype("uint8")
 
-        # --- Keypoint Check ---
 
         # We only need the keypoint count, not the descriptors
         kp_m = sift.detect(img_m, None)
@@ -69,12 +74,12 @@ def find_optimal_sift_level_by_keypoints(
         logger.info(f"Level {i}: Keypoints (M={count_m}, F={count_f})")
 
         # 1. Check if both images have too many keypoints (coarse-to-fine step)
-        if count_m > k_max and count_f > k_max:
+        if count_m < k_min and count_f < k_min:
             # If too many, keep iterating (go coarser/higher index)
             continue
 
         # 2. Check if both images have enough keypoints
-        if count_m >= k_min and count_f >= k_min:
+        if count_m >= k_max and count_f >= k_max:
             # This is the coarsest level that meets the k_min requirement for both.
             best_level = i
             return best_level
@@ -98,14 +103,60 @@ def main(moving_fp, fixed_fp, k_min, k_max, max_level_search, min_level_search, 
     logger.info(f"Optimal level saved to {output_file_path}")
     return best_level
 
+def parse_arguments():
+    """Parses command-line arguments using argparse."""
+    parser = argparse.ArgumentParser(
+        description="Find optimal SIFT pyramid levels for image registration."
+    )
+
+    # Define the arguments as named flags
+    parser.add_argument(
+        "--moving-file",
+        required=True,
+        type=str,
+        help="Path to the moving TIFF file.",
+    )
+    parser.add_argument(
+        "--fixed-file",
+        required=True,
+        type=str,
+        help="Path to the fixed TIFF file.",
+    )
+    parser.add_argument(
+        "--k-min",
+        required=True,
+        type=int,
+        help="Minimum number of SIFT keypoints required.",
+    )
+    parser.add_argument(
+        "--k-max",
+        required=True,
+        type=int,
+        help="Maximum number of SIFT keypoints allowed.",
+    )
+    parser.add_argument(
+        "--max-level-search",
+        required=True,
+        type=int,
+        help="Maximum pyramid level to search.",
+    )
+    parser.add_argument(
+        "--min-level-search",
+        required=True,
+        type=int,
+        help="Minimum pyramid level to search.",
+    )
+
+    return parser.parse_args()
 
 if __name__ == "__main__":
-    moving_fp = sys.argv[1]
-    fixed_fp = sys.argv[2]
-    k_min = int(sys.argv[3])
-    k_max = int(sys.argv[4])
-    max_level_search = int(sys.argv[5])
-    min_level_search = int(sys.argv[6])
+    args = parse_arguments()
+    moving_fp = args.moving_file
+    fixed_fp = args.fixed_file
+    k_min = args.k_min
+    k_max = args.k_max
+    max_level_search = args.max_level_search
+    min_level_search = args.min_level_search
 
     checkpoint_dir = Path(moving_fp).parent
 

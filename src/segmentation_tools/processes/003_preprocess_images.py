@@ -2,7 +2,9 @@ from pathlib import Path
 from loguru import logger
 import sys
 import numpy as np
+import matplotlib.pyplot as plt
 import tifffile
+import argparse
 
 from segmentation_tools.utils import normalize, get_multiotsu_threshold
 
@@ -28,13 +30,14 @@ def main(input_file_path, dapi_channel_moving, level, output_file_path, filter):
     dapi_image = load_image(
         input_file_path=input_file_path, channel=dapi_channel_moving, level=level
     )
+    print(dapi_image.shape)
 
     dapi_image_normalized = normalize(dapi_image)
     if not filter:
         np.save(output_file_path, dapi_image_normalized)
         return
     
-    otsu_threshold_value = get_multiotsu_threshold(image=dapi_image_normalized, num_classes=4)
+    otsu_threshold_value = get_multiotsu_threshold(image=dapi_image_normalized, num_classes=6)
     logger.info(f"Otsu's threshold: {otsu_threshold_value}")
 
     dapi_image_filtered = np.where(
@@ -44,33 +47,55 @@ def main(input_file_path, dapi_channel_moving, level, output_file_path, filter):
     np.save(output_file_path, dapi_image_filtered)
     return
 
+def parse_arguments():
+    """Parses command-line arguments using argparse."""
+    parser = argparse.ArgumentParser(
+        description="Preprocess images by filtering DAPI channel using Otsu's method."
+    )
+
+    parser.add_argument(
+        "--input-file-path",
+        required=True,
+        type=str,
+        help="Path to the input OME-TIFF file.",
+    )
+    parser.add_argument(
+        "--dapi-channel-moving",
+        required=True,
+        type=int,
+        help="Channel index for the DAPI channel in the moving image.",
+    )
+    parser.add_argument(
+        "--level",
+        required=True,
+        type=int,
+        help="Pyramid level to load from the OME-TIFF file.",
+    )
+    parser.add_argument(
+        "--output-file-path",
+        required=True,
+        type=str,
+        help="Path to save the preprocessed output .npy file.",
+    )
+    parser.add_argument(
+        "--filter",
+        action='store_true',
+        help="Whether to apply Otsu's filtering to the DAPI channel.",
+    )
+
+    return parser.parse_args()
+
 
 if __name__ == "__main__":
-    # if len(sys.argv) != 4 and len(sys.argv) != 5:
-    #     logger.error(
-    #         "Usage: python preprocess_images.py <input_file_path> <dapi_channel_moving> <fixed_or_moving> [level]"
-    #     )
-    #     sys.exit(1)
+    args = parse_arguments()
 
-    input_file_path = sys.argv[1]
-    dapi_channel_moving = int(sys.argv[2])
-    fixed_or_moving = sys.argv[3]
-
-    filter = fixed_or_moving == "moving"
+    input_file_path = args.input_file_path
+    dapi_channel_moving = args.dapi_channel_moving
+    level = args.level
+    output_file_path = args.output_file_path
+    filter = args.filter
 
     checkpoint_dir = Path(input_file_path).parent
-    if len(sys.argv) == 5:
-        level = int(sys.argv[4])
-    else:
-        level_file_path = checkpoint_dir / "optimal_sift_level.txt"
-        if not level_file_path.exists():
-            raise FileNotFoundError(f"Optimal level file not found: {level_file_path}")
-
-        with open(level_file_path, "r") as f:
-            level = int(f.readline().strip())
-
-    output_file_name = f"{fixed_or_moving}_dapi_filtered_level_{level}.npy"
-    output_file_path = Path(input_file_path).parent / output_file_name
 
     main(
         input_file_path=input_file_path,

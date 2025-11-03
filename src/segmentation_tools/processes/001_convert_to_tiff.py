@@ -7,7 +7,7 @@ from typing import Union
 from loguru import logger
 import tifffile
 from segmentation_tools.utils.config import CHECKPOINT_DIR_NAME
-from icecream import ic
+import argparse
 
 
 # --- Internal Helper Functions ---
@@ -85,34 +85,59 @@ def convert_file_to_tiff(input_file_path: Path, output_file_path: Path):
     logger.success(f"Successfully converted and saved TIFF: {output_file_path.name}")
     return True
 
+def parse_arguments():
+    """Parses command-line arguments using argparse."""
+    parser = argparse.ArgumentParser(
+        description="Convert a file to TIFF format, specifying paths and a prefix."
+    )
 
-# --- Command-Line Entry Point ---
+    # Define the arguments as named flags
+    parser.add_argument(
+        "--input-path",
+        required=True,
+        type=str,
+        help="The path to the input file to be converted.",
+    )
+    parser.add_argument(
+        "--output-root",
+        required=True,
+        type=str,
+        help="The root directory where the output file will be saved.",
+    )
+    parser.add_argument(
+        "--prefix",
+        required=True,
+        type=str,
+        help="A prefix to use for the output TIFF file name.",
+    )
 
-# Parameters
-# input_path (file or dir to convert)
-# output_root (dir to save file to)
+    return parser.parse_args()
+
+
+def main(input_file_path, output_root, prefix):
+    # 3. Construct the output path
+    output_file_name = Path(output_root) / Path(CHECKPOINT_DIR_NAME) / Path(f"{prefix}.tiff")
+    
+    # 4. Execute the conversion
+    convert_file_to_tiff(
+        input_file_path=Path(input_file_path),
+        output_file_path=output_file_name,
+    )
+    logger.info("Conversion pipeline complete.")
+
 
 if __name__ == "__main__":
-    if len(sys.argv) != 4:
-        print(len(sys.argv))
-        print(sys.argv)
-        print("Usage: python tiff_converter.py <input_path> <output_root> <prefix>")
-        sys.exit(1)
+    # 1. Parse Arguments using named flags
+    args = parse_arguments()
 
-    input_file_path = sys.argv[1]
-    output_root = sys.argv[2]
-    prefix = sys.argv[3]
+    # 2. Access arguments by their names
+    input_file_path = args.input_path
+    output_root = args.output_root
+    prefix = args.prefix
 
-    output_file_name = Path(output_root) / Path(CHECKPOINT_DIR_NAME) / Path(f"{prefix}.tiff")
-    try:
-        convert_file_to_tiff(
-            input_file_path=Path(input_file_path),
-            output_file_path=Path(output_file_name),
-        )
-        logger.info("Conversion pipeline complete.")
-    except Exception as e:
-        logger.error(
-            "Usage: python tiff_converter.py <input_file_path> <output_root> <prefix>"
-        )
-        logger.error(f"An unexpected error occurred in the pipeline: {e}")
-        sys.exit(1)
+    main(
+        input_file_path=input_file_path,
+        output_root=output_root,
+        prefix=prefix,
+    )
+    

@@ -4,7 +4,7 @@ import numpy as np
 from pathlib import Path
 from scipy.ndimage import map_coordinates
 import mirage
-
+import argparse
 
 def run_mirage(
     warped_image,
@@ -63,6 +63,41 @@ def run_mirage(
 
     return mirage_model.get_transform()
 
+def parse_arguments():
+    """Parses command-line arguments using argparse."""
+    parser = argparse.ArgumentParser(
+        description="Run MIRAGE alignment on warped and fixed images."
+    )
+
+    parser.add_argument(
+        "--warped-file-path",
+        required=True,
+        type=str,
+        help="Path to the warped image .npy file.",
+    )
+    parser.add_argument(
+        "--fixed-file-path",
+        required=True,
+        type=str,
+        help="Path to the fixed image .npy file.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        required=False,
+        type=int,
+        default=256,
+        help="Batch size for MIRAGE training.",
+    )
+    parser.add_argument(
+        "--learning-rate",
+        required=False,
+        type=float,
+        default=0.001,
+        help="Learning rate for MIRAGE training.",
+    )
+
+    return parser.parse_args()
+
 
 def main(warped_file_path, fixed_file_path, checkpoint_dir):
     warped_image = np.load(warped_file_path)
@@ -87,16 +122,11 @@ def main(warped_file_path, fixed_file_path, checkpoint_dir):
 
 
 if __name__ == "__main__":
-    # if len(sys.argv) != 3:
-    #     logger.error(
-    #         "Usage: python 004_warp_image_with_sift.py <warped_file> <transform_file>"
-    #     )
-    #     sys.exit(1)
-
-    warped_file_path = sys.argv[1]
-    fixed_file_path = sys.argv[2]
-    batch_size = sys.argv[3] if len(sys.argv) > 3 else 256
-    lr = sys.argv[4] if len(sys.argv) > 4 else 0.001
+    args = parse_arguments()
+    warped_file_path = args.warped_file_path
+    fixed_file_path = args.fixed_file_path
+    batch_size = args.batch_size
+    lr = args.learning_rate
 
     checkpoint_dir = Path(warped_file_path).parent
     main(

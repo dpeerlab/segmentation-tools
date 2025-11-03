@@ -8,8 +8,7 @@ import skimage
 from skimage.transform import ProjectiveTransform
 from segmentation_tools.utils import normalize, get_multiotsu_threshold
 from segmentation_tools.utils.config import CHECKPOINT_DIR_NAME, RESULTS_DIR_NAME
-
-
+import argparse
 
 def _apply_channel_warp_and_normalize(
     channel_data: np.ndarray,
@@ -18,17 +17,11 @@ def _apply_channel_warp_and_normalize(
     channel_normalized = normalize(channel_data)
     otsu_threshold_value = get_multiotsu_threshold(channel_normalized)
 
-    if otsu_threshold_value is None or otsu_threshold_value > 0.2:
-        threshold = 0.15
-        logger.warning(
-            f"Otsu's threshold {otsu_threshold_value} is out of expected range [0.05, 0.5]. Using default threshold {threshold}."
-        )
-    else:
-        logger.info(f"Otsu's threshold for channel: {otsu_threshold_value}")    
-        threshold = otsu_threshold_value
-        channel_filtered = np.where(
-            channel_normalized < threshold, 0, channel_normalized
-        )
+    logger.info(f"Otsu's threshold for channel: {otsu_threshold_value}")    
+    threshold = otsu_threshold_value
+    channel_filtered = np.where(
+        channel_normalized < threshold, 0, channel_normalized
+    )
 
     channel_warped = skimage.transform.warp(
         channel_filtered,
@@ -159,14 +152,14 @@ def combine_transforms(
     return final_inverse_map
 
 def main(
-    moving_tiff_file_path: np.ndarray,
+    moving_file_path: np.ndarray,
     high_res_level: int,
     linear_transform_file_path: Path,
     mirage_transform_file_path: Path,
     results_dir: Path,
 ):
     moving_image = tifffile.imread(
-        moving_tiff_file_path, series=0, level=high_res_level, maxworkers=4
+        moving_file_path, series=0, level=high_res_level, maxworkers=4
     )
     moving_image = np.moveaxis(
         np.array(moving_image), 0, -1
@@ -179,7 +172,7 @@ def main(
         mirage_warp=mirage_warp, linear_transform=linear_transform
     )
 
-    n_levels = get_num_levels(moving_tiff_file_path) - high_res_level
+    n_levels = get_num_levels(moving_file_path) - high_res_level
     _ = warp_and_save_pyramidal_tiff(
         moving_image=moving_image,
         combined_transform=combined_tranform,
@@ -189,24 +182,40 @@ def main(
     )
     return 0
 
+def parse_arguments():
+    """Parses command-line arguments using argparse."""
+    parser = argparse.ArgumentParser(
+        description="Warp all channels of a multi-resolution TIFF and downsample."
+    )
+
+    parser.add_argument(
+        "--moving-file-path",
+        required=True,
+        type=str,
+        help="Path to the moving TIFF file.",
+    )
+    parser.add_argument(
+        "--high-res-level",
+        required=True,
+        type=int,
+        help="High resolution level index.",
+    )
+
+    return parser.parse_args()
+
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        logger.error(
-            "Usage: python 006_warp_all_channels_and_downsample.py <warped_file> <transform_file>"
-        )
-        sys.exit(1)
-
-    moving_tiff_file_path = sys.argv[1]
-    high_res_level = int(sys.argv[2])
-    checkpoint_dir = Path(moving_tiff_file_path).parent.parent / CHECKPOINT_DIR_NAME
+    args = parse_arguments()
+    moving_file_path = args.moving_file_path
+    high_res_level = args.high_res_level
+    checkpoint_dir = Path(moving_file_path).parent.parent / CHECKPOINT_DIR_NAME
 
     linear_transform_file_path = checkpoint_dir / "linear_transform.npy"
     mirage_transform_file_path = checkpoint_dir / "mirage_transform.npy"
-    results_dir = Path(moving_tiff_file_path).parent.parent / RESULTS_DIR_NAME
+    results_dir = Path(moving_file_path).parent.parent / RESULTS_DIR_NAME
 
     main(
-        moving_tiff_file_path=moving_tiff_file_path,
+        moving_file_path=moving_file_path,
         high_res_level=high_res_level,
         linear_transform_file_path=linear_transform_file_path,
         mirage_transform_file_path=mirage_transform_file_path,

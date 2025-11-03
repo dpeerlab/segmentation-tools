@@ -1,0 +1,7 @@
+numpy==1.26.3
+opencv-python==4.9.0.80
+scikit-image==0.22.0
+tensorflow==2.15.0.post1
+tqdm==4.66.1
+urllib3==1.26.6
+pytest==7.4.4

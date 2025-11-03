@@ -54,6 +54,31 @@ def normalize(
 
     return img_clahe.astype(np.float32) / 65535.0
 
+def get_multiotsu_threshold(image: np.ndarray, num_classes: int = 6, min_bound = 0.1, max_bound = 0.2) -> float:
+    """
+    Computes Otsu's threshold for the given image.
+    """
+    if np.all(image == image.flat[0]):
+        return None
+
+    original_thresh = threshold_multiotsu(image, classes=num_classes)
+    print(original_thresh)
+    thresh_val = original_thresh[0]
+
+    if thresh_val < min_bound:
+        thresh = threshold_multiotsu(image, classes=num_classes-1)
+        print(thresh)
+        thresh_val = thresh[0]
+    elif thresh_val > max_bound:
+        thresh = threshold_multiotsu(image, classes=num_classes+1)
+        print(thresh)
+        thresh_val = thresh[0]
+
+    if thresh_val < min_bound:
+        thresh_val = original_thresh[1]
+    return thresh_val
+
+
 def create_rgb_overlay(fixed, moving):
     fixed = fixed.astype(np.float32)
     moving = moving.astype(np.float32)
@@ -73,17 +98,3 @@ def create_rgb_overlay(fixed, moving):
     rgb = np.clip(rgb, 0, 1)  # Ensure values are in [0, 1]
     return rgb
 
-def get_multiotsu_threshold(image: np.ndarray, num_classes: int = 4) -> float:
-    """
-    Computes Otsu's threshold for the given image.
-    """
-    if np.all(image == image.flat[0]):
-        return None
-
-    thresh = threshold_multiotsu(image, classes=num_classes)[0]
-
-    if thresh < 0.05:
-        thresh = threshold_multiotsu(image, classes=num_classes-1)[0]
-    elif thresh > 0.2:
-        thresh = threshold_multiotsu(image, classes=num_classes+1)[0]
-    return thresh

@@ -12,6 +12,7 @@ from skimage.metrics import structural_similarity as ssim
 from concurrent.futures import ProcessPoolExecutor
 import matplotlib.pyplot as plt
 from icecream import ic
+import argparse
 
 
 def get_SIFT_homography(
@@ -219,15 +220,12 @@ def main(
     fixed_level = int(level)
 
     ic("loading")
-    moving_image_cp = np.load(moving_file_path)
-    fixed_image_cp = np.load(fixed_file_path)
-
-    ic("hist match")
-    moving_image_cp = skimage.exposure.match_histograms(moving_image_cp, fixed_image_cp)
+    moving_image = np.load(moving_file_path)
+    fixed_image = np.load(fixed_file_path)
 
     ic("sift")
     sift_transform = find_best_sift(
-        moving_image=moving_image_cp, fixed_image=fixed_image_cp
+        moving_image=moving_image, fixed_image=fixed_image
     )
     np.save(
         os.path.join(checkpoint_dir, "sift_transform.npy"),
@@ -261,24 +259,53 @@ def main(
     logger.info(f"Transformation linear map saved to {linear_output_path}")
     return 0
 
+def parse_arguments():
+    """Parses command-line arguments using argparse."""
+    parser = argparse.ArgumentParser(
+        description="Find SIFT alignment transform between moving and fixed images."
+    )
+
+    # Define the arguments as named flags
+    parser.add_argument(
+        "--moving-file-path",
+        required=True,
+        type=str,
+        help="Path to the moving .npy file.",
+    )
+    parser.add_argument(
+        "--fixed-file-path",
+        required=True,
+        type=str,
+        help="Path to the fixed .npy file.",
+    )
+    parser.add_argument(
+        "--high-res-level",
+        required=True,
+        type=int,
+        help="High resolution pyramid level.",
+    )
+    parser.add_argument(
+        "--original-moving-file-path",
+        required=True,
+        type=str,
+        help="Path to the original moving TIFF file.",
+    )
+    parser.add_argument(
+        "--original-fixed-file-path",
+        required=True,
+        type=str,
+        help="Path to the original fixed TIFF file.",
+    )
+
+    return parser.parse_args()
+
 
 if __name__ == "__main__":
-    if len(sys.argv) != 6:
-        logger.error(
-            "Usage: python 003_find_alignment_transform.py <moving_file> <fixed_file> <high_res_level> <original_moving_file> <original_fixed_file>"
-        )
-        sys.exit(1)
-
-    moving_file_path = sys.argv[1]
-    fixed_file_path = sys.argv[2]
-    high_res_level = sys.argv[3]
-    original_moving_file_path = sys.argv[4]
-    original_fixed_file_path = sys.argv[5]
-
+    args = parse_arguments()
     main(
-        moving_file_path=moving_file_path,
-        fixed_file_path=fixed_file_path,
-        high_res_level=high_res_level,
-        original_moving_file_path=original_moving_file_path,
-        original_fixed_file_path=original_fixed_file_path,
+        moving_file_path=args.moving_file_path,
+        fixed_file_path=args.fixed_file_path,
+        high_res_level=args.high_res_level,
+        original_moving_file_path=args.original_moving_file_path,
+        original_fixed_file_path=args.original_fixed_file_path,
     )
