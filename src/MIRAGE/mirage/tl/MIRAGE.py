@@ -1,6 +1,3 @@
-
-LOSS_FILE_PATH = "/data1/peerd/spatial_datalake/roses3_pancreas_pdac_basal_ablation/xenium/x.txt"
-
 from icecream import ic
 import os
 import tensorflow as tf
@@ -11,6 +8,7 @@ import matplotlib.pyplot as plt
 import skimage
 import torch
 import time
+from loguru import logger
 
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
 
@@ -345,13 +343,49 @@ class MIRAGE(tf.keras.Model):
         self.log_sig_scale_factor = tf.Variable(
             initial_value=initial_log_scale_factor, trainable=True, name="sig_scale_factor_log", dtype=tf.float32
         )
-        ref_blur = skimage.filters.gaussian(self.references[0], sigma=5)
-        img_blur = skimage.filters.gaussian(self.images[0], sigma=5)
-        dissimilarity_map = np.abs(ref_blur - img_blur)
+        logger.info("before dissim map")
+        # ref_blur = skimage.filters.gaussian(self.references[0], sigma=5)
+        # img_blur = skimage.filters.gaussian(self.images[0], sigma=5)
+        # dissimilarity_map = np.abs(ref_blur - img_blur)
 
-        self.dissimilarity_map = (dissimilarity_map / dissimilarity_map.max()).astype(
-            "float32"
+        # self.dissimilarity_map = (dissimilarity_map / dissimilarity_map.max()).astype(
+        #     "float32"
+        # )
+
+        # 1. Transfer image data to a TF Tensor on the GPU
+        ref_tf = tf.constant(self.references[0][None, ..., None], dtype=tf.float32) # Add batch and channel dims
+        img_tf = tf.constant(self.images[0][None, ..., None], dtype=tf.float32)
+
+        # 2. Use TF's Gaussian Filter (requires SciPy filter layer)
+        # If you don't want to rely on TF-addons or specific layers, 
+        # a simple average pool (or a custom convolution) can approximate the blur.
+
+        # --- Fast Approximation (Average Pooling for Blur) ---
+        # A 9x9 average pool is a fast approximation of a soft blur
+        kernel_size = 9 
+        ref_blur_tf = tf.nn.avg_pool2d(
+            ref_tf, ksize=kernel_size, strides=1, padding='SAME'
         )
+        img_blur_tf = tf.nn.avg_pool2d(
+            img_tf, ksize=kernel_size, strides=1, padding='SAME'
+        )
+
+        # 3. Calculate dissimilarity entirely on the GPU
+        dissimilarity_map_tf = tf.abs(ref_blur_tf - img_blur_tf)
+
+        # 4. Squeeze to remove batch and channel dimensions (Shape: [H, W])
+        dissimilarity_map_sq = tf.squeeze(dissimilarity_map_tf, axis=[0, 3])
+
+        # 5. Normalize on the GPU using correct function call
+        max_val = tf.reduce_max(dissimilarity_map_sq)
+        dissimilarity_map_normalized_tf = dissimilarity_map_sq / max_val
+
+        # 6. CONVERT TO NUMPY HERE (Crucial step for model compatibility)
+        self.dissimilarity_map = dissimilarity_map_normalized_tf.numpy().astype("float32")
+
+        # 7. Explicitly delete temporary Tensors for memory management
+        del ref_tf, img_tf, ref_blur_tf, img_blur_tf, dissimilarity_map_tf, dissimilarity_map_sq, dissimilarity_map_normalized_tf
+        logger.info("after dissim map")
 
         """
         ic| self.y_mesh: <tf.Tensor: shape=(49, 49), dtype=int32, numpy=
@@ -466,6 +500,7 @@ class MIRAGE(tf.keras.Model):
         """
         ... (Docstring truncated)
         """
+
         x_bin = np.where(self.bin_mask == 1)[0].astype("int32")
         y_bin = np.where(self.bin_mask == 1)[1].astype("int32")
 
@@ -492,7 +527,7 @@ class MIRAGE(tf.keras.Model):
             dissimilarity_vals = self.dissimilarity_map[x_ind_img, y_ind_img]
 
             pixel_glimpses_float, pixel_glimpses_ref = self.get_glimpses(
-                x_ind_img, y_ind_img
+                y_ind_img, x_ind_img
             )
 
             # Normalize the indices to be between 0 and 1
@@ -507,9 +542,6 @@ class MIRAGE(tf.keras.Model):
                 loss = self.compute_loss(
                     output_offset, pixel_glimpses_float, pixel_glimpses_ref
                 )
-
-                with open(LOSS_FILE_PATH, "a") as f:
-                    f.write(f"{loss.numpy()}\n")
 
             gradients = tape.gradient(loss, self.trainable_variables)
             optimizer.apply_gradients(zip(gradients, self.trainable_variables))
@@ -702,7 +734,8 @@ class MIRAGE(tf.keras.Model):
             [self.num_images, -1],
         )
         return -tf.reduce_mean(ssim_val * self.coeff[:, None])
-    # can potentially bump num_cut upt to 1_000_000
+    
+
     def compute_transform(self, num_cut=100_000, pool=None):
         """
         Calculate transformation for each pixel in memory-safe batches.
@@ -737,7 +770,7 @@ class MIRAGE(tf.keras.Model):
 
         t0 = time.time()
         # Process in batches
-        for start in range(0, pixel_ind.shape[0], num_cut):
+        for start in trange(0, pixel_ind.shape[0], num_cut, leave=True, desc="Computing transform"):
             end = min(start + num_cut, pixel_ind.shape[0])
 
             coords_x = tf.constant(x_norm_all[start:end], dtype=tf.float32)

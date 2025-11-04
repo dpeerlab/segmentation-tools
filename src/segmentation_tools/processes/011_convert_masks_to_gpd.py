@@ -83,7 +83,7 @@ def contours_to_polygons(
     return gpd.GeoDataFrame(geometry=polygons, index=ids[indices])
 
 def main(masks_file_path, results_dir: str):
-    masks = tifffile.imread(masks_file_path, series=0, level=0, key=0)
+    masks = np.load(masks_file_path)
     contours = masks_to_contours(masks)
     gdf = contours_to_polygons(contours[:, 0], contours[:, 1], contours[:, 2])
     output_file_path = Path(results_dir) / "segmentation_masks.parquet"

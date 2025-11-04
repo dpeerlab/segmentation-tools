@@ -12,11 +12,11 @@ if __name__ == "__main__":
 
     checkpoint_dir = sys.argv[1]
     moving = np.load(
-        os.path.join(checkpoint_dir, "moving_dapi_warped.npy")
+        os.path.join(checkpoint_dir, "moving_dapi_linear_warped.npy")
     )
 
     fixed = np.load(
-        os.path.join(checkpoint_dir, "fixed_dapi_filtered_level_0.npy")
+        os.path.join(checkpoint_dir, "high_res_fixed_dapi_filtered_level_0.npy")
     )
 
     mssim, ssim_full = ssim(

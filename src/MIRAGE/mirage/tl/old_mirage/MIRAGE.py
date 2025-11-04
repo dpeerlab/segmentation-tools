@@ -415,7 +415,6 @@ class MIRAGE(tf.keras.Model):
             starting_coords = tf.stack((x_ind, y_ind), axis=1)
             # Assuming append_to_txt_file is defined elsewhere or this line is removed for non-essential code
             # self.append_to_txt_file(self.save_glimpses_file_path, starting_coords.numpy())
-            pass
 
 
         # gather_nd extracts values from the images at the specified coordinates

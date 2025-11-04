@@ -1,6 +1,6 @@
 import scipy
 import numpy as np
-from run_cellpose import models, core, io, plot
+from cellpose import models, core, io, plot
 import matplotlib.pyplot as plt
 from loguru import logger
 import sys
