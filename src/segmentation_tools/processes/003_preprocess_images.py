@@ -37,7 +37,7 @@ def main(input_file_path, dapi_channel_moving, level, output_file_path, filter):
         np.save(output_file_path, dapi_image_normalized)
         return
     
-    otsu_threshold_value = get_multiotsu_threshold(image=dapi_image_normalized, num_classes=6)
+    otsu_threshold_value = get_multiotsu_threshold(image=dapi_image_normalized)
     logger.info(f"Otsu's threshold: {otsu_threshold_value}")
 
     dapi_image_filtered = np.where(

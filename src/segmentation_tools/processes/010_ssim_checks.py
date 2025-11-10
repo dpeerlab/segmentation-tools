@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import os
 
 
-if __name__ == "__main__":
+def main():
 
     checkpoint_dir = sys.argv[1]
     moving = np.load(
@@ -26,9 +26,14 @@ if __name__ == "__main__":
         full=True
     )
 
+    pre_mirage_ssim_path = os.path.join(checkpoint_dir, "ssim_pre_mirage.png")
+    if os.path.exists(pre_mirage_ssim_path):
+        logger.info(f"Pre-MIRAGE SSIM plot already exists at {pre_mirage_ssim_path}. Skipping computation.")
+        return 0
+
     plt.imshow(ssim_full, cmap = "gray")
     plt.suptitle(f"Pre-MIRAGE, SSIM: {mssim}")
-    plt.savefig(os.path.join(checkpoint_dir, "ssim_pre_mirage.png"))
+    plt.savefig(pre_mirage_ssim_path)
     plt.close()
 
     results_dir = Path(checkpoint_dir).parent / "results"
@@ -56,4 +61,8 @@ if __name__ == "__main__":
     plt.suptitle(f"Post-MIRAGE, SSIM: {mssim}")
     plt.savefig(os.path.join(checkpoint_dir, "ssim_post_mirage.png"))
 
+
+
+if __name__ == "__main__":
+    main()
 

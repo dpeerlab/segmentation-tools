@@ -1,12 +1,12 @@
-import tifffile
-from Pathlib import Path
+import argparse
+from pathlib import Path
 from numpy.typing import ArrayLike
 import geopandas as gpd
 import numpy as np
 import skimage
 import shapely
 import cv2
-import sys
+from loguru import logger
 
 def masks_to_contours(masks: ArrayLike) -> np.ndarray:
     """
@@ -82,11 +82,42 @@ def contours_to_polygons(
     indices = np.sort(np.unique(ids, return_index=True)[1])
     return gpd.GeoDataFrame(geometry=polygons, index=ids[indices])
 
+def parse_arguments():
+    """Parses command-line arguments using argparse."""
+    parser = argparse.ArgumentParser(
+        description="Convert segmentation masks to GeoDataFrame of polygons."
+    )
+
+    parser.add_argument(
+        "--masks",
+        required=True,
+        type=str,
+        help="Path to the segmentation masks file.",
+    )
+
+    parser.add_argument(
+        "--prefix",
+        required=False,
+        type=str,
+        help="Prefix for the output files.",
+    )
+
+    return parser.parse_args()
+
 def main(masks_file_path, results_dir: str):
     masks = np.load(masks_file_path)
     contours = masks_to_contours(masks)
     gdf = contours_to_polygons(contours[:, 0], contours[:, 1], contours[:, 2])
-    output_file_path = Path(results_dir) / "segmentation_masks.parquet"
+
+    if args.prefix:
+        output_file_path = Path(results_dir) / f"{args.prefix}_segmentation_masks.parquet"
+    else:
+        output_file_path = Path(results_dir) / "segmentation_masks.parquet"
+
+    if output_file_path.exists():
+        logger.info(f"Segmentation GeoDataFrame already exists at {output_file_path}. Skipping computation.")
+        return 0
+
     gdf.to_parquet(
         output_file_path,
         write_covering_bbox=True,
@@ -94,7 +125,8 @@ def main(masks_file_path, results_dir: str):
     )
 
 if __name__ == "__main__":
-    masks_file_path = sys.argv[1]
+    args = parse_arguments()
+    masks_file_path = args.masks
     results_dir = Path(masks_file_path).parent
 
     main(masks_file_path=masks_file_path, results_dir=results_dir)

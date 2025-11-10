@@ -9,10 +9,33 @@ import os
 import tifffile
 import argparse
 
-def main(warped_moving_file_path = os.PathLike, result_dir = os.PathLike, dapi_channel = int, membrane_channel = int):
+def main(warped_moving_file_path: os.PathLike, result_dir: os.PathLike, dapi_channel: int, membrane_channel: int = None):
     """
     Segments the warped moving image using Cellpose and saves the segmentation masks.
     """
+
+    # Load the warped moving image
+    warped_moving_image = tifffile.imread(warped_moving_file_path, series=0, level=0)
+    logger.info(f"Warped moving image shape: {warped_moving_image.shape}")
+
+    # Select channels for segmentation (e.g., DAPI and membrane)
+    dapi_image = warped_moving_image[dapi_channel, :, :]
+
+    if membrane_channel is not None:
+        membrane_image = warped_moving_image[membrane_channel, :, :]
+        img_selected_channels = np.stack([membrane_image, dapi_image], axis=0)
+        prefix = "membrane_dapi"
+    else:
+        img_selected_channels = dapi_image
+        prefix = "dapi"
+    
+    output_cell_prob_path = Path(result_dir) / f"{prefix}_cell_probabilities.npy"
+    output_mask_path = Path(result_dir) / f"{prefix}_segmentation_masks.npy"
+
+    if output_mask_path.exists() and output_cell_prob_path.exists():
+        logger.info(f"Segmentation outputs already exist at {output_mask_path} and {output_cell_prob_path}. Skipping computation.")
+        return 0
+
     io.logger_setup()
     logger.info("CellPose logger set up")
 
@@ -21,22 +44,13 @@ def main(warped_moving_file_path = os.PathLike, result_dir = os.PathLike, dapi_c
 
     model = models.CellposeModel(gpu=True)
 
-    # Load the warped moving image
-    warped_moving_image = tifffile.imread(warped_moving_file_path, series=0, level=0)
-    logger.info(f"Warped moving image shape: {warped_moving_image.shape}")
-
-    # Select channels for segmentation (e.g., DAPI and membrane)
-    dapi_channel = warped_moving_image[dapi_channel, :, :]
-    membrane_channel = warped_moving_image[membrane_channel, :, :]
-    img_selected_channels = np.stack([membrane_channel, dapi_channel], axis=0)
-
     # Segment the image
-    flow_threshold = 0.4
+    flow_threshold = 0.0
     cellprob_threshold = 0.0
     tile_norm_blocksize = 0
 
     logger.info("Starting CellPose")
-    masks, flows, styles = model.eval(
+    masks, flows, _ = model.eval(
         img_selected_channels, 
         augment = True,
         batch_size=2,
@@ -49,12 +63,12 @@ def main(warped_moving_file_path = os.PathLike, result_dir = os.PathLike, dapi_c
 
     cell_prob_logit = flows[2]
     cell_prob = scipy.special.expit(cell_prob_logit)
-    output_cell_prob_path = Path(result_dir) / "cell_probabilities.npy"
+    
     np.save(output_cell_prob_path, cell_prob)
     logger.info(f"Cell probabilities saved to {output_cell_prob_path}")
 
     # Save the segmentation masks
-    output_mask_path = Path(result_dir) / "combined_segmentation_masks.npy"
+    
     np.save(output_mask_path, masks.astype(np.uint32))
     logger.info(f"Segmentation masks saved to {output_mask_path}")
     return
@@ -79,7 +93,7 @@ def parse_arguments():
     )
     parser.add_argument(
         "--membrane-channel",
-        required=True,
+        required=False,
         type=int,
         help="Index of the membrane channel in the image.",
     )
@@ -91,6 +105,14 @@ if __name__ == "__main__":
     warped_moving_file_path = args.warped_moving_file_path
     dapi_channel = args.dapi_channel
     membrane_channel = args.membrane_channel
+
+    logger.info(f"DAPI channel provided: {dapi_channel}")
+    
+    if membrane_channel is None:
+        logger.info("No membrane channel provided, proceeding with DAPI channel only.")
+    else:
+        logger.info(f"Membrane channel provided: {membrane_channel}")
+
     result_dir = Path(warped_moving_file_path).parent
 
     main(

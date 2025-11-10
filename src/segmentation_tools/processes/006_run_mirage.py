@@ -5,6 +5,7 @@ from pathlib import Path
 from scipy.ndimage import map_coordinates
 import mirage
 import argparse
+import os
 
 def run_mirage(
     warped_image,
@@ -12,7 +13,7 @@ def run_mirage(
     bin_mask=None,
     pad=12,
     offset=12,
-    num_neurons=300,
+    num_neurons=200,
     num_layers=3,
     pool=1,
     loss="SSIM",
@@ -101,10 +102,15 @@ def parse_arguments():
 
 def main(warped_file_path, fixed_file_path, checkpoint_dir):
     warped_image = np.load(warped_file_path)
+    mirage_transform_file_path = checkpoint_dir / "mirage_transform.npy"
+    if os.path.exists(mirage_transform_file_path):
+        logger.info(f"MIRAGE transform already exists at {mirage_transform_file_path}. Skipping computation.")
+        return 0
+        
     mirage_transform = run_mirage(
         warped_image=warped_image,
         fixed_image=np.load(fixed_file_path),
-        pad=15,
+        pad=13,
         offset=15,
         num_neurons=400,
         num_layers=4,
@@ -115,7 +121,6 @@ def main(warped_file_path, fixed_file_path, checkpoint_dir):
     if mirage_transform is None:
         logger.error("MIRAGE alignment failed.")
         return 1
-    mirage_transform_file_path = checkpoint_dir / "mirage_transform.npy"
     np.save(mirage_transform_file_path, mirage_transform)
     logger.info(f"MIRAGE transform saved to {mirage_transform_file_path}")
     return 0

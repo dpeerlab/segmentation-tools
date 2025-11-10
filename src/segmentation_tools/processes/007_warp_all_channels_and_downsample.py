@@ -105,7 +105,7 @@ def warp_and_save_pyramidal_tiff(
                 axis=0,
             )
             # Ensure the downsampled data remains in the [0, 1] range for the next loop
-            current = np.clip(np.nan_to_num(current, nan=0.0), 0, 1)
+        current = np.clip(np.nan_to_num(current, nan=0.0), 0, 1)
 
     # 3. Save TIFF Pyramid (on CPU) - No change here
     with tifffile.TiffWriter(output_file_path, bigtiff=True) as tif:
@@ -158,6 +158,11 @@ def main(
     mirage_transform_file_path: Path,
     results_dir: Path,
 ):
+    output_file_path = results_dir / f"moving_complete_transform.ome.tiff"
+    if output_file_path.exists():
+        logger.info(f"Warped and downsampled file already exists at {output_file_path}. Skipping computation.")
+        return 0
+    
     moving_image = tifffile.imread(
         moving_file_path, series=0, level=high_res_level, maxworkers=4
     )
@@ -177,7 +182,7 @@ def main(
         moving_image=moving_image,
         combined_transform=combined_tranform,
         n_levels=n_levels,
-        output_file_path=results_dir / f"moving_complete_transform.ome.tiff",
+        output_file_path=output_file_path,
         description="Warped and Downsampled",
     )
     return 0
