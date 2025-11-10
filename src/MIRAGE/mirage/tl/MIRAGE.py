@@ -6,7 +6,7 @@ import warnings
 from tqdm import trange
 import matplotlib.pyplot as plt
 import skimage
-import torch
+import cv2
 import time
 from loguru import logger
 
@@ -352,39 +352,36 @@ class MIRAGE(tf.keras.Model):
         #     "float32"
         # )
 
-        # 1. Transfer image data to a TF Tensor on the GPU
-        ref_tf = tf.constant(self.references[0][None, ..., None], dtype=tf.float32) # Add batch and channel dims
-        img_tf = tf.constant(self.images[0][None, ..., None], dtype=tf.float32)
+        sigma = 5
 
-        # 2. Use TF's Gaussian Filter (requires SciPy filter layer)
-        # If you don't want to rely on TF-addons or specific layers, 
-        # a simple average pool (or a custom convolution) can approximate the blur.
-
-        # --- Fast Approximation (Average Pooling for Blur) ---
-        # A 9x9 average pool is a fast approximation of a soft blur
-        kernel_size = 9 
-        ref_blur_tf = tf.nn.avg_pool2d(
-            ref_tf, ksize=kernel_size, strides=1, padding='SAME'
-        )
-        img_blur_tf = tf.nn.avg_pool2d(
-            img_tf, ksize=kernel_size, strides=1, padding='SAME'
+        # 1. Apply Gaussian blurring to the reference image
+        # OpenCV requires float-like types for Gaussian blur output when sigma is large
+        ref_blur = cv2.GaussianBlur(
+            self.references[0].astype(np.float32), 
+            ksize=(0, 0), 
+            sigmaX=sigma, 
+            sigmaY=sigma
         )
 
-        # 3. Calculate dissimilarity entirely on the GPU
-        dissimilarity_map_tf = tf.abs(ref_blur_tf - img_blur_tf)
+        # 2. Apply Gaussian blurring to the input image
+        img_blur = cv2.GaussianBlur(
+            self.images[0].astype(np.float32), 
+            ksize=(0, 0), 
+            sigmaX=sigma, 
+            sigmaY=sigma
+        )
 
-        # 4. Squeeze to remove batch and channel dimensions (Shape: [H, W])
-        dissimilarity_map_sq = tf.squeeze(dissimilarity_map_tf, axis=[0, 3])
+        # 3. Calculate the absolute difference (dissimilarity map)
+        # Ensure the blurred images are of the same type for subtraction
+        dissimilarity_map = np.abs(ref_blur - img_blur)
 
-        # 5. Normalize on the GPU using correct function call
-        max_val = tf.reduce_max(dissimilarity_map_sq)
-        dissimilarity_map_normalized_tf = dissimilarity_map_sq / max_val
-
-        # 6. CONVERT TO NUMPY HERE (Crucial step for model compatibility)
-        self.dissimilarity_map = dissimilarity_map_normalized_tf.numpy().astype("float32")
-
-        # 7. Explicitly delete temporary Tensors for memory management
-        del ref_tf, img_tf, ref_blur_tf, img_blur_tf, dissimilarity_map_tf, dissimilarity_map_sq, dissimilarity_map_normalized_tf
+        # 4. Normalize and set the data type (equivalent to your original normalization)
+        # Avoid division by zero: check if the max is zero before normalizing
+        map_max = dissimilarity_map.max()
+        if map_max > 0:
+            self.dissimilarity_map = (dissimilarity_map / map_max).astype("float32")
+        else:
+            self.dissimilarity_map = dissimilarity_map.astype("float32")
         logger.info("after dissim map")
 
         """
