@@ -607,7 +607,7 @@ class MIRAGE(tf.keras.Model):
         # 2. Concatenate with learned features and static image features
         output = tf.concat(
             [
-                tf.cast(pos_encoded, tf.float32),
+                # tf.cast(pos_encoded, tf.float32),
                 tf.cast(coords_norm, tf.float32),  # Also keep raw coordinates
                 tf.cast(dissimilarity_input[:, None], tf.float32),
             ],
@@ -679,7 +679,7 @@ class MIRAGE(tf.keras.Model):
             tf.nn.softmax(-tf.reshape(field, [vec.shape[0], -1]), axis=-1),
             [vec.shape[0], 2 * self.offset + 1, 2 * self.offset + 1],
         )
-        # plt.imshow(field[0])
+
         # plt.show()
 
         # plt.title("Field after softmax")
@@ -696,6 +696,7 @@ class MIRAGE(tf.keras.Model):
             padding="VALID",
         )
         # pixel_glimpses_float shape is (1, 25, 25, 512)
+
 
         if self.loss == "MultiSSIM":
             return self.multi_ssim(pixel_glimpses_float, pixel_glimpses_ref)

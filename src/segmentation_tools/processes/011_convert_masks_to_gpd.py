@@ -114,9 +114,9 @@ def main(masks_file_path, results_dir: str):
     else:
         output_file_path = Path(results_dir) / "segmentation_masks.parquet"
 
-    if output_file_path.exists():
-        logger.info(f"Segmentation GeoDataFrame already exists at {output_file_path}. Skipping computation.")
-        return 0
+    # if output_file_path.exists():
+    #     logger.info(f"Segmentation GeoDataFrame already exists at {output_file_path}. Skipping computation.")
+    #     return 0
 
     gdf.to_parquet(
         output_file_path,
