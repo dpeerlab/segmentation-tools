@@ -7,14 +7,13 @@ import argparse
 
 import sys
 
-
 def find_optimal_sift_level_by_keypoints(
     moving_file: Union[str, Path],
     fixed_file: Union[str, Path],
     k_min: int,
     k_max: int,
-    max_level_search: int,
-    min_level_search: int,
+    max_level_search: int = None,
+    min_level_search: int = None,
 ) -> int:
     """
     Finds the coarsest common pyramid level that yields a sufficient number
@@ -28,22 +27,22 @@ def find_optimal_sift_level_by_keypoints(
         return 0
 
     max_possible_level = min(
-        len(tif_m.series[0].levels) - 1,
-        len(tif_f.series[0].levels) - 1,
-        max_level_search,
+        len(tif_m.series[0].levels) - 1, len(tif_f.series[0].levels) - 1
     )
 
-    min_possible_level = max(
-        0,
-        min_level_search,
-    )
+    if max_level_search is not None:
+        max_possible_level = min(max_possible_level, max_level_search)
+    if min_level_search is not None:
+        min_level_search = max(min_level_search, 0)
+    else:
+        min_level_search = 0
 
     sift = cv2.SIFT_create()
     best_level = 0
 
     # Iterate from a coarse level (highest index) down to Level 0
-    for i in range(max_possible_level, min_possible_level, -1):
-
+    for i in range(max_possible_level, min_level_search - 1, -1):
+        print(i)
         # Load the image data for this level
         # Note: tifffile.TiffPage.asarray() loads the image into memory (NumPy)
         img_m_page = tif_m.series[0].levels[i]
@@ -73,21 +72,17 @@ def find_optimal_sift_level_by_keypoints(
 
         logger.info(f"Level {i}: Keypoints (M={count_m}, F={count_f})")
 
-        # 1. Check if both images have too many keypoints (coarse-to-fine step)
-        if count_m < k_min and count_f < k_min:
-            # If too many, keep iterating (go coarser/higher index)
+        if count_m < k_min or count_f < k_min:
             continue
 
-        # 2. Check if both images have enough keypoints
-        if count_m >= k_max and count_f >= k_max:
-            # This is the coarsest level that meets the k_min requirement for both.
-            best_level = i
+        if count_m > k_max or count_f > k_max:
+            best_level = i - 1
             return best_level
 
-    best_level = max(min_level_search, best_level)
-
-    # If the loop completes without finding a suitable coarse level,
-    # it means only Level 0 or a very low level can meet k_min.
+        if k_min < count_m < k_max and k_min < count_f < k_max:
+            best_level = i
+            return best_level
+        
     return best_level
 
 
@@ -136,13 +131,13 @@ def parse_arguments():
     )
     parser.add_argument(
         "--max-level-search",
-        required=True,
+        required=False,
         type=int,
         help="Maximum pyramid level to search.",
     )
     parser.add_argument(
         "--min-level-search",
-        required=True,
+        required=False,
         type=int,
         help="Minimum pyramid level to search.",
     )
