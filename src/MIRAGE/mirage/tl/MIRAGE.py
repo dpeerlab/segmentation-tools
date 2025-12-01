@@ -775,7 +775,7 @@ class MIRAGE(tf.keras.Model):
             coords_y = tf.constant(y_norm_all[start:end], dtype=tf.float32)
             dissim = tf.constant(dissim_all[start:end], dtype=tf.float32)
 
-            vec_batch, _ = self.forward_passoords_x, coords_y, dissim)
+            vec_batch, _ = self.forward_passoords_x, coords_y, dissim
             pixel_transform[start:end] = vec_batch.numpy() * self.offset
 
         print(f"Loop: {time.time()-t0:.4f}s")
