@@ -72,15 +72,14 @@ def find_optimal_sift_level_by_keypoints(
 
         logger.info(f"Level {i}: Keypoints (M={count_m}, F={count_f})")
 
+        best_level = i
         if count_m < k_min or count_f < k_min:
             continue
 
         if count_m > k_max or count_f > k_max:
-            best_level = i - 1
-            return best_level
+            return best_level + 1
 
         if k_min < count_m < k_max and k_min < count_f < k_max:
-            best_level = i
             return best_level
         
     return best_level
