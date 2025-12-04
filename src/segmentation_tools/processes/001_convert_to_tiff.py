@@ -10,9 +10,6 @@ from segmentation_tools.utils.config import CHECKPOINT_DIR_NAME
 import argparse
 
 
-# --- Internal Helper Functions ---
-
-
 def _is_tiff_file(file_path: Union[str, Path]) -> bool:
     """Check if a file is a valid TIFF."""
     file_path = Path(file_path)

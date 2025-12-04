@@ -5,7 +5,6 @@ from typing import Union
 from loguru import logger
 import argparse
 
-import sys
 
 def find_optimal_sift_level_by_keypoints(
     moving_file: Union[str, Path],
@@ -84,19 +83,6 @@ def find_optimal_sift_level_by_keypoints(
         
     return best_level
 
-
-def main(moving_fp, fixed_fp, k_min, k_max, max_level_search, min_level_search, checkpoint_dir):
-    best_level = find_optimal_sift_level_by_keypoints(
-        moving_fp, fixed_fp, k_min, k_max, max_level_search, min_level_search
-    )
-    logger.info(f"Optimal SIFT Level: {best_level}")
-
-    output_file_path = checkpoint_dir / "optimal_sift_level.txt"
-    with open(output_file_path, "w") as f:
-        f.write(str(best_level) + "\n")
-    logger.info(f"Optimal level saved to {output_file_path}")
-    return best_level
-
 def parse_arguments():
     """Parses command-line arguments using argparse."""
     parser = argparse.ArgumentParser(
@@ -142,6 +128,21 @@ def parse_arguments():
     )
 
     return parser.parse_args()
+
+
+def main(moving_fp, fixed_fp, k_min, k_max, max_level_search, min_level_search, checkpoint_dir):
+    best_level = find_optimal_sift_level_by_keypoints(
+        moving_fp, fixed_fp, k_min, k_max, max_level_search, min_level_search
+    )
+    logger.info(f"Optimal SIFT Level: {best_level}")
+
+    output_file_path = checkpoint_dir / "optimal_sift_level.txt"
+    with open(output_file_path, "w") as f:
+        f.write(str(best_level) + "\n")
+    logger.info(f"Optimal level saved to {output_file_path}")
+    return best_level
+
+
 
 if __name__ == "__main__":
     args = parse_arguments()
