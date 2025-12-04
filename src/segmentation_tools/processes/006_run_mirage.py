@@ -17,7 +17,7 @@ def run_mirage(
     num_layers=3,
     pool=1,
     loss="SSIM",
-    batch_size=256,
+    batch_size=1024,
     num_steps=2048,
     lr=0.001,
 ):
@@ -112,8 +112,6 @@ def main(warped_file_path, fixed_file_path, checkpoint_dir):
         fixed_image=np.load(fixed_file_path),
         pad=13,
         offset=15,
-        num_neurons=400,
-        num_layers=4,
         pool=1,
         loss="SSIM",
     )
