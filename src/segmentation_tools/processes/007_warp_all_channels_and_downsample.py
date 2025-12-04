@@ -32,7 +32,6 @@ def _apply_channel_warp_and_normalize(
 
     return channel_warped
 
-
 def warp_and_save_pyramidal_tiff(
     moving_image: np.ndarray,
     combined_transform: np.ndarray,
