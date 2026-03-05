@@ -109,3 +109,7 @@ ENV/
 
 # data files
 data/
+
+
+# Claude
+CLAUDE.md
