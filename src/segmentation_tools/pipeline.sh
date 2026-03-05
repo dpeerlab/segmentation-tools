@@ -175,8 +175,8 @@ python \
     --masks ${RESULTS_DIR}/membrane_segmentation_masks.npy \
     --prefix "membrane"
 
-# python \
-#     /data1/peerd/ghoshr/segmentation_tools/src/segmentation_tools/processes/012_combine_combined_and_nuclei_masks.py \
-#     --combined-masks ${RESULTS_DIR}/membrane_dapi_segmentation_masks.parquet \
-#     --nuclei-masks ${RESULTS_DIR}/dapi_segmentation_masks.parquet
+python \
+    /data1/peerd/ghoshr/segmentation_tools/src/segmentation_tools/processes/012_combine_combined_and_nuclei_masks.py \
+    --combined-masks ${RESULTS_DIR}/membrane_dapi_segmentation_masks.parquet \
+    --nuclei-masks ${RESULTS_DIR}/dapi_segmentation_masks.parquet
     
