@@ -64,8 +64,8 @@ class MIRAGE(tf.keras.Model):
         bin_mask=None,
         num_layers=3,
         num_neurons=1024,
-        pad=24,
-        offset=24,
+        pad=13,
+        offset=15,
         batch_size=512,
         LR=0.001,
         LR_sched=True,
@@ -177,42 +177,47 @@ class MIRAGE(tf.keras.Model):
         ):
             os.remove(save_transform_file_path)
 
+
         self.num_layers = num_layers
         self.num_neurons = num_neurons
         self.references = references.astype("float32")  # TensorFlow prefers float32
+        print("self.references.shape:", self.references.shape)
+        self.num_images = 1
+        print("self.num_images:", self.num_images)
         self.images = images.astype("float32")
         self.bin_mask = bin_mask
         self.loss = loss
 
-        # Added by Rohit to expand dimensions if needed - allows user to pass in 2D images
+
         if self.references.ndim == 2:
             self.references = np.expand_dims(self.references, axis=0) 
         if self.images.ndim == 2:
             self.images = np.expand_dims(self.images, axis=0)
+        # if self.bin_mask is not None and self.bin_mask.ndim == 2:
+        #     ic("here 2")
+        #     self.bin_mask = np.expand_dims(self.bin_mask, axis=0)
+        # if self.bin_mask is None:
+        #     ic("here 1")
+        #     self.bin_mask = np.ones(self.references.shape[1:3], dtype=np.uint8)
+
+
         if self.bin_mask is not None and self.bin_mask.ndim == 2:
             ic("here 2")
             self.bin_mask = np.expand_dims(self.bin_mask, axis=0)
-        if self.bin_mask is None:
-            ic("here 1")
-            self.bin_mask = np.ones(self.references.shape[1:3], dtype=np.uint8)
 
         # Gets the number of images (for our purposes, we are just using the first channel) - num_images is referring to the number of images
         # images input is (C, H, W)
-        self.num_images = self.references.shape[0]
-        self.image_height = self.references.shape[
-            1
-        ]  # All channels should have the same dimensions
-        self.image_width = self.references.shape[2]
+
         self.batch_size=batch_size
         self.LR=LR
         self.LR_sched=LR_sched
 
         ic(self.references.shape)
         ic(self.images.shape)
-        ic(self.bin_mask.shape)
+        # ic(self.bin_mask.shape)
         ic(pool)
-        ic(self.image_height)
-        ic(self.image_width)
+        # ic(self.image_height)
+        # ic(self.image_width)
         ic(self.references.astype("float")[:, :, :, None].shape)
 
         self.pos_encoding_L = 10
@@ -268,27 +273,42 @@ class MIRAGE(tf.keras.Model):
                     .astype("float32")
                 )
                 # Same thing here as for references
-                self.bin_mask = (
-                    tf.squeeze(
-                        (
-                            tf.nn.avg_pool(
-                                self.bin_mask.astype("float")[None, :, :, None],
-                                ksize=[self.pool, self.pool],
-                                strides=[self.pool, self.pool],
-                                padding="SAME",
+                if self.bin_mask is not None:
+                        self.bin_mask = (
+                            tf.squeeze(
+                                (
+                                    tf.nn.avg_pool(
+                                        self.bin_mask.astype("float")[None, :, :, None],
+                                        ksize=[self.pool, self.pool],
+                                        strides=[self.pool, self.pool],
+                                        padding="SAME",
+                                    )
+                                )
                             )
+                            .numpy()
+                            .astype("int32")
                         )
-                    )
-                    .numpy()
-                    .astype("int32")
-                )
+                # Default mask created AFTER pooling, at pooled resolution
+                if self.bin_mask is None:
+                    self.bin_mask = np.ones(self.references.shape[1:3], dtype=np.uint8)
         else:
             # Default is no pooling
             self.pool = 1
+            if self.bin_mask is None:
+                self.bin_mask = np.ones(self.references.shape[1:3], dtype=np.uint8)
 
         # Brings offset and pad down based on pooling factor - again why is pooling necessary? is it to smooth things out?
         self.offset = int(offset / self.pool)
         self.pad = int(pad / self.pool)
+
+        
+        self.image_height = self.references.shape[
+            1
+        ]  # All channels should have the same dimensions
+        self.image_width = self.references.shape[2]
+
+        print("self.image_height:", self.image_height)
+        print("self.image_width:", self.image_width)
 
         # Gives weight to specific images? Not entirely sure why
         if coeff is None:
@@ -302,7 +322,7 @@ class MIRAGE(tf.keras.Model):
         # Variance of the distribution is scaled based on the number of input and output neurons of the layer, meaning that the variance of the acitvations
         # and backprop gradients (signals don't grow or shrink too quickly)
         # Var = 2 / (num_neurons_in + num_neurons_out) -> apparently goes well with sigmoid and tanh
-        self.initializer = tf.keras.initializers.GlorotNormal()
+        self.initializer = tf.keras.initializers.GlorotNormal(seed=42 )
 
         # Runs through layers
         for i in range(self.num_layers):
@@ -411,6 +431,12 @@ class MIRAGE(tf.keras.Model):
         Computes pixel glimpses using pure NumPy operations.
         Replicates TF's behavior by returning 0 for out-of-bounds pixels.
         """
+        # print("image_height:", self.image_height)
+        # print("image_width:", self.image_width)
+        # print("x_ind range:", x_ind.min(), x_ind.max())
+        # print("y_ind range:", y_ind.min(), y_ind.max())
+        # print("x_mesh range:", self.x_mesh.min(), self.x_mesh.max())
+        # print("references shape:", self.references.shape)
         
         # 1. Create coordinate grids
         X = (
@@ -419,6 +445,8 @@ class MIRAGE(tf.keras.Model):
         Y = (
             self.y_mesh[np.newaxis, :, :] + y_ind[:, np.newaxis, np.newaxis]
         )
+        # print("X shape:", X.shape, "X range:", X.min(), X.max())
+        # print("Y shape:", Y.shape, "Y range:", Y.min(), Y.max())
 
         # 2. Create in-bounds masks
         X_in_bounds = (X >= 0) & (X < self.image_width)
@@ -429,6 +457,8 @@ class MIRAGE(tf.keras.Model):
         # 3. Create "safe" indices (clipped) to avoid indexing errors
         X_safe = np.clip(X, 0, self.image_width - 1).astype(np.int64)
         Y_safe = np.clip(Y, 0, self.image_height - 1).astype(np.int64)
+        # print("X_safe range:", X_safe.min(), X_safe.max())
+        # print("Y_safe range:", Y_safe.min(), Y_safe.max())
 
         # 4. Gather for 'pixel_glimpses_float'
         glimpses_list = []
@@ -497,6 +527,12 @@ class MIRAGE(tf.keras.Model):
         """
         ... (Docstring truncated)
         """
+
+        print("bin_mask shape:", self.bin_mask.shape)
+        print("references shape:", self.references.shape)
+        print("dissimilarity_map shape:", self.dissimilarity_map.shape)
+        print("x_mesh shape:", self.x_mesh.shape)
+        print("offset:", self.offset, "pad:", self.pad)
 
         x_bin = np.where(self.bin_mask == 1)[0].astype("int32")
         y_bin = np.where(self.bin_mask == 1)[1].astype("int32")
@@ -732,42 +768,42 @@ class MIRAGE(tf.keras.Model):
             [self.num_images, -1],
         )
         return -tf.reduce_mean(ssim_val * self.coeff[:, None])
-    
+        
 
-    def compute_transform(self, num_cut=100_000, pool=None):
+    def compute_transform(self, num_cut=100_000):
         """
         Calculate transformation for each pixel in memory-safe batches.
-
-        Parameters:
-        * pool: Pooling factor
-        * num_cut: Batch size (number of pixels to process at once)
+        Always reconstructs at the original (pre-pool) resolution.
         """
-        if pool is None:
-            pool = self.pool
+        pool = self.pool
 
-        h, w = self.references.shape[1], self.references.shape[2]
+        # self.references is already at pooled resolution (H//pool, W//pool)
+        h_pooled = self.references.shape[1]
+        w_pooled = self.references.shape[2]
 
-        # Raw pixel coordinates
-        xv = np.arange(h * pool)
-        yv = np.arange(w * pool)
+        h_full = h_pooled * pool
+        w_full = w_pooled * pool
+
+        # Full-res pixel coordinates
+        xv = np.arange(h_full)
+        yv = np.arange(w_full)
         pixel_ind = np.stack(np.meshgrid(xv, yv, indexing="ij"), axis=-1).reshape(-1, 2)
 
-        # Normalized coords
-        x_norm_all = pixel_ind[:, 0] / float(h * pool)
-        y_norm_all = pixel_ind[:, 1] / float(w * pool)
+        # Normalize using full-res dimensions
+        x_norm_all = pixel_ind[:, 0] / float(h_full)
+        y_norm_all = pixel_ind[:, 1] / float(w_full)
 
         t0 = time.time()
-        # Dissimilarity values
+        # Dissimilarity map is at pooled resolution - index with floor division
         dissim_all = self.dissimilarity_map[
-            pixel_ind[:, 0] // pool, pixel_ind[:, 1] // pool
+            pixel_ind[:, 0] // pool,
+            pixel_ind[:, 1] // pool,
         ]
         print(f"Dissim map: {time.time()-t0:.4f}s")
 
-        # Storage for dense transform
         pixel_transform = np.zeros((pixel_ind.shape[0], 2), dtype=np.float32)
 
         t0 = time.time()
-        # Process in batches
         for start in trange(0, pixel_ind.shape[0], num_cut, leave=True, desc="Computing transform"):
             end = min(start + num_cut, pixel_ind.shape[0])
 
@@ -775,33 +811,33 @@ class MIRAGE(tf.keras.Model):
             coords_y = tf.constant(y_norm_all[start:end], dtype=tf.float32)
             dissim = tf.constant(dissim_all[start:end], dtype=tf.float32)
 
-            vec_batch, _ = self.forward_passoords_x, coords_y, dissim
-            pixel_transform[start:end] = vec_batch.numpy() * self.offset
+            vec_batch, _ = self.forward_pass(coords_x, coords_y, dissim)
+            # vec is in [-1,1], scale to full-res pixels
+            # self.offset = original_offset // pool, so * pool recovers full-res magnitude
+            pixel_transform[start:end] = vec_batch.numpy() * self.offset * pool
 
         print(f"Loop: {time.time()-t0:.4f}s")
         t0 = time.time()
 
+        # Swap x/y axes to match image indexing convention
         pixel_transform = pixel_transform[:, [1, 0]]
 
-        # Apply displacements to pixel coordinates
-        new_ind = pixel_ind.astype(np.float32) - (pixel_transform * pool)
+        # Subtract displacement from pixel coords to get source coords
+        new_ind = pixel_ind.astype(np.float32) - pixel_transform
 
-        # Reshape to full image grid
-        new_ind = new_ind.reshape(h * pool, w * pool, 2)
+        # Reshape to full-res grid
+        new_ind = new_ind.reshape(h_full, w_full, 2)
 
         # Clamp to valid range
-        new_ind[new_ind < 0] = 0
-        new_ind[:, :, 0][new_ind[:, :, 0] > h * pool - 1] = h * pool - 1
-        new_ind[:, :, 1][new_ind[:, :, 1] > w * pool - 1] = w * pool - 1
+        new_ind[:, :, 0] = np.clip(new_ind[:, :, 0], 0, h_full - 1)
+        new_ind[:, :, 1] = np.clip(new_ind[:, :, 1], 0, w_full - 1)
 
-        # Store dense transform (compatible with apply_transform)
         self.full_transform = new_ind
 
         if self.save_transform_file_path:
             np.save(self.save_transform_file_path, self.full_transform)
 
         print(f"Final: {time.time()-t0:.4f}s")
-
         return 0
 
     def apply_transform(self, image):

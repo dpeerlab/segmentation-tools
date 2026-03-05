@@ -1,8 +1,6 @@
-import sys
 from loguru import logger
 import numpy as np
 from pathlib import Path
-from scipy.ndimage import map_coordinates
 import mirage
 import argparse
 import os

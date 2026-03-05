@@ -106,7 +106,7 @@ def warp_and_save_pyramidal_tiff(
             # Ensure the downsampled data remains in the [0, 1] range for the next loop
         current = np.clip(np.nan_to_num(current, nan=0.0), 0, 1)
 
-    # 3. Save TIFF Pyramid (on CPU) - No change here
+    # 3. Save TIFF Pyramid (on CPU)
     with tifffile.TiffWriter(output_file_path, bigtiff=True) as tif:
         metadata = {
             "axes": "CYX",  # Indicates [Channel, Y, X] axes order

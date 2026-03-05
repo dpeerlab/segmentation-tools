@@ -1,4 +1,4 @@
-#!/bin/bash
+w #!/bin/bash
 
 JOB_TITLE=$1
 FIXED_FILE=$2
