@@ -6,28 +6,95 @@ from pathlib import Path
 import tifffile
 import skimage
 from skimage.transform import ProjectiveTransform
+from skimage.util import img_as_ubyte
+import pyvips
+from tqdm import tqdm
 from segmentation_tools.utils import normalize, get_multiotsu_threshold
 from segmentation_tools.utils.config import CHECKPOINT_DIR_NAME, RESULTS_DIR_NAME
 import argparse
 
+
+def _warp_channel_pyvips(
+    channel_data: np.ndarray,
+    combined_transform: np.ndarray,
+    tile_height: int = 4096,
+    interpolation: str = "bilinear",
+) -> np.ndarray:
+    """
+    Warp a single channel using pyvips mapim with tiled processing for memory efficiency.
+
+    Args:
+        channel_data: 2D numpy array (H, W) with uint8 values.
+        combined_transform: Dense coordinate map with shape (2, out_H, out_W),
+            where [0] = row coords and [1] = col coords into source image.
+        tile_height: Height of processing tiles.
+        interpolation: Interpolation method ("bilinear", "bicubic", "nearest").
+
+    Returns:
+        Warped image as float32 array in [0, 1].
+    """
+    height, width = channel_data.shape
+    out_rows, out_cols = combined_transform.shape[1], combined_transform.shape[2]
+
+    # combined_transform is (2, H, W) where [0]=row, [1]=col
+    # pyvips mapim expects (H, W, 2) with [x, y] i.e. [col, row]
+    map_array = np.stack(
+        [combined_transform[1], combined_transform[0]], axis=-1
+    ).astype(np.float32)
+
+    vips_img = pyvips.Image.new_from_memory(
+        channel_data.tobytes(), width, height, 1, "uchar"
+    )
+
+    interp = pyvips.Interpolate.new(interpolation)
+
+    tiles = []
+    for start_row in tqdm(
+        range(0, out_rows, tile_height), desc="Warping channel", leave=False
+    ):
+        end_row = min(start_row + tile_height, out_rows)
+        tile_rows = end_row - start_row
+
+        tile_coords = np.ascontiguousarray(map_array[start_row:end_row])
+        map_img = pyvips.Image.new_from_memory(
+            tile_coords.data, out_cols, tile_rows, 2, "float"
+        )
+
+        tile_warped = vips_img.mapim(map_img, interpolate=interp)
+        tile_np = np.ndarray(
+            buffer=tile_warped.write_to_memory(),
+            dtype=np.uint8,
+            shape=(tile_rows, out_cols),
+        ).copy()
+        tiles.append(tile_np)
+
+    warped = np.concatenate(tiles, axis=0)
+    return warped.astype(np.float32) / 255.0
+
+
 def _apply_channel_warp_and_normalize(
     channel_data: np.ndarray,
     combined_transform: np.ndarray,
+    tile_height: int = 4096,
+    interpolation: str = "bilinear",
 ) -> np.ndarray:
     channel_normalized = normalize(channel_data)
     otsu_threshold_value = get_multiotsu_threshold(channel_normalized)
 
-    logger.info(f"Otsu's threshold for channel: {otsu_threshold_value}")    
+    logger.info(f"Otsu's threshold for channel: {otsu_threshold_value}")
     threshold = otsu_threshold_value
     channel_filtered = np.where(
         channel_normalized < threshold, 0, channel_normalized
     )
 
-    channel_warped = skimage.transform.warp(
-        channel_filtered,
-        inverse_map=combined_transform,
-        output_shape=combined_transform.shape,
-        order=3,
+    # Convert to uint8 for pyvips
+    channel_uint8 = img_as_ubyte(np.clip(channel_filtered, 0, 1).astype(np.float64))
+
+    channel_warped = _warp_channel_pyvips(
+        channel_uint8,
+        combined_transform,
+        tile_height=tile_height,
+        interpolation=interpolation,
     )
 
     return channel_warped
