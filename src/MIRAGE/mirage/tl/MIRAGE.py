@@ -1,834 +1,922 @@
-from icecream import ic
+"""
+MIRAGE: Multi-modal Image Registration via Adaptive Glimpse Encoding
+
+Production-ready implementation of the MIRAGE image registration algorithm.
+Aligns a moving image to a fixed reference image using a coordinate-based
+neural network that predicts per-pixel displacement fields.
+"""
+
 import os
-import tensorflow as tf
-import numpy as np
-import warnings
-from tqdm import trange
-import matplotlib.pyplot as plt
-import skimage
-import cv2
 import time
-from loguru import logger
+import warnings
 
-os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+import cv2
+import numpy as np
+import skimage.transform
+import tensorflow as tf
+from tqdm import trange
 
-def create_rgb_overlay(fixed, moving):
+
+os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
+
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+
+def create_rgb_overlay(fixed: np.ndarray, moving: np.ndarray) -> np.ndarray:
+    """
+    Create a red-cyan RGB overlay for visualising alignment quality.
+
+    Red channel  = fixed image.
+    Green + Blue = moving image (appears cyan).
+    White pixels indicate well-aligned regions.
+    """
     fixed = fixed.astype(np.float32)
     moving = moving.astype(np.float32)
 
-    # Normalize to [0,1] range
     if fixed.max() > 0:
         fixed /= fixed.max()
     if moving.max() > 0:
         moving /= moving.max()
-    # Create RGB without perceptual scaling
+
     rgb = np.zeros((*fixed.shape, 3), dtype=np.float32)
-    rgb[..., 0] = fixed  # R
-    rgb[..., 1] = moving  # G
-    rgb[..., 2] = moving  # B
+    rgb[..., 0] = fixed
+    rgb[..., 1] = moving
+    rgb[..., 2] = moving
+    return np.clip(rgb, 0, 1)
 
-    rgb = np.clip(rgb, 0, 1)  # Ensure values are in [0, 1]
-    return rgb
 
-def get_positional_encoding(coords, L=10):
+@tf.function
+def get_positional_encoding(coords: tf.Tensor, L: int = 10) -> tf.Tensor:
     """
-    Apply Positional Encoding to coordinates (x, y).
+    Apply sinusoidal positional encoding to 2-D coordinates.
 
-    Input coords: Tensor of shape (N, 2) normalized to [-1, 1], dtype=tf.float32.
-    Output: Tensor of shape (N, 4*L).
+    Parameters
+    ----------
+    coords : tf.Tensor, shape (N, 2), dtype float32
+        Normalised coordinates in [-1, 1].
+    L : int
+        Number of frequency octaves.
+
+    Returns
+    -------
+    tf.Tensor, shape (N, 4*L)
     """
-    # frequencies tensor
-    base_powers = tf.pow(2, tf.range(L, dtype=tf.float32))
-
-    # multiply by pi
+    base_powers = tf.pow(
+        tf.constant(2, dtype=tf.float32), tf.range(L, dtype=tf.float32)
+    )
     freqs = base_powers * tf.constant(np.pi, dtype=tf.float32)
 
-    # Outer product: (N, 2) x (1, L) -> (N, 2, L)
-    sincos_input = tf.cast(coords[..., None], tf.float32) * tf.cast(
-        freqs[None, None, :], tf.float32
+    # (N, 2, L)
+    sincos_input = (
+        tf.cast(coords[..., None], tf.float32)
+        * tf.cast(freqs[None, None, :], tf.float32)
     )
 
-    # shape (N, 2, L)
     sin_part = tf.sin(sincos_input)
     cos_part = tf.cos(sincos_input)
 
-    output = tf.concat([sin_part, cos_part], axis=-1)
-    return tf.reshape(output, (tf.shape(coords)[0], -1))
+    encoded = tf.concat([sin_part, cos_part], axis=-1)
+    return tf.reshape(encoded, (tf.shape(coords)[0], -1))
 
+
+# ---------------------------------------------------------------------------
+# Main model
+# ---------------------------------------------------------------------------
 
 class MIRAGE(tf.keras.Model):
+    """
+    MIRAGE image registration model.
+
+    Learns a continuous, coordinate-based displacement field that maps pixels
+    in a moving image onto a fixed reference image.
+
+    Parameters
+    ----------
+    references : np.ndarray
+        Fixed reference image(s). Shape (H, W) or (C, H, W). Values in [0, 1].
+    images : np.ndarray
+        Moving image(s) to be aligned. Same shape as ``references``.
+    bin_mask : np.ndarray, optional
+        Binary mask (1 = valid pixel). Shape (H, W) or (C, H, W).
+        Defaults to all-ones (all pixels used).
+    num_layers : int
+        Number of hidden layers in the MLP.
+    num_neurons : int
+        Width of each hidden layer.
+    pad : int
+        Half-size of the reference glimpse (in pixels, pre-pooling).
+    offset : int
+        Maximum displacement magnitude (in pixels, pre-pooling).
+    batch_size : int
+        Number of glimpse centres sampled per training step.
+    LR : float
+        Initial learning rate for AdamW.
+    LR_sched : bool
+        If True, reduce LR to 10 % at 75 % of training.
+    pool : int, optional
+        Average-pooling factor applied to images before training (speeds up
+        computation; transforms are still returned at full resolution).
+    loss : str
+        Loss function. Only ``"SSIM"`` is tested.
+    coeff : array-like, optional
+        Per-channel weighting coefficients. Defaults to ones.
+    save_glimpses_file_path : str, optional
+        If set, save glimpse debug data to this path.
+    save_transform_file_path : str, optional
+        If set, save the computed transform array to this path (.npy).
+    """
+
     def __init__(
         self,
-        references,
-        images,
-        bin_mask=None,
-        num_layers=3,
-        num_neurons=1024,
-        pad=13,
-        offset=15,
-        batch_size=512,
-        LR=0.001,
-        LR_sched=True,
-        pool=None,
-        loss="SSIM",
+        references: np.ndarray,
+        images: np.ndarray,
+        bin_mask: np.ndarray = None,
+        num_layers: int = 3,
+        num_neurons: int = 1024,
+        pad: int = 13,
+        offset: int = 15,
+        batch_size: int = 512,
+        LR: float = 0.001,
+        LR_sched: bool = True,
+        pool: int = None,
+        loss_type: str = "SSIM",
         coeff=None,
-        save_glimpses_file_path=None,
-        save_transform_file_path=None,
+        smoothness_weight: float = 0.1,
+        smoothness_radius: int = 30,
+        rigidity_weight: float = 0.1,
+        pos_encoding_L: int = 6,
+        dissim_sigma: int = None,
+        save_glimpses_file_path: str = None,
+        save_transform_file_path: str = None,
     ):
-        """
-        Fit Mirage model.
-
-        Parameters:
-        * references: 2D array of images to be aligned. Can be a list of images.
-        * images: 2D array of reference images. Can be a list of images.
-        * bin_mask: 2D array of binary mask. Default is None which means all pixels are used.
-        * num_layers: Number of layers in the neural network
-        * num_neurons: Number of neurons in each layer
-        * pad: Padding for each glimpse
-        * offset: Maximum stepsize for each transformation
-        * pool: Pooling factors reducing the image size
-        * loss: Loss function, only SSIM is supported and tested for now
-        * coeff: Coefficients for each image
-
-        Methods:
-        * train: Train the model
-        * compute_transform: Compute the transformation for each pixel
-        * apply_transform: Apply the transformation to an image
-
-        Example:
-        ```
-        import mirage
-
-        # Load image
-        image = reference = mirage.tl.get_data("sample1.tiff")
-
-        # Construct model
-        mirage_model = mirage.MIRAGE(
-            references=image,
-            images=reference,
-            pad=12,
-            offset=12,
-            num_neurons=196,
-            num_layers=2,
-            loss="SSIM"
-        )
-
-        # Train model
-        mirage_model.train(batch_size=256, num_steps=256, LR_sched=True, LR=0.005)
-
-        # Calculate transformation
-        mirage_model.compute_transform()
-
-        # Apply transformation
-        img_tran = mirage_model.apply_transform(image)
-        ```
-        """
-
         super().__init__()
 
-        # Set settings
-        tf.config.run_functions_eagerly(
-            True
-        )  # according to TF docs should avoid in prod but is useful for debugging (bring up to Tobi?)
+        tf.config.run_functions_eagerly(False)
 
-        # Assertions
-        # * Images shape must align
-        # * Images must be 2D or a list of 2D images
-        # * Images must be between 0 and 1
-        # * Mask must be same shape as images
-        # * GPU must be available (for now)
+        # ------------------------------------------------------------------
+        # Input validation
+        # ------------------------------------------------------------------
         assert references.shape == images.shape, (
-            f"Images must be same shape. Got {references.shape} (aligning) and "
-            f"{images.shape} (reference)."
+            f"Images must be the same shape. "
+            f"Got references={references.shape}, images={images.shape}."
         )
-        assert references.ndim in [
-            2,
-            3,
-        ], f"Images must be 2D or a list of 2D images. Got dimension {references.ndim}."
+        assert references.ndim in (2, 3), (
+            f"Images must be 2-D or a stack of 2-D images (3-D). "
+            f"Got ndim={references.ndim}."
+        )
         assert np.all(references >= 0) and np.all(references <= 1), (
-            f"Image values must be between 0 and 1. Got min: {np.min(references)} "
-            f"and max: {np.max(references)}. Transform images to 0-1 using for example: `<img> / 255`"
+            f"Image values must be in [0, 1]. "
+            f"Got min={np.min(references):.4f}, max={np.max(references):.4f}. "
+            f"Normalise with e.g. `img / 255`."
         )
-        assert (bin_mask is None) or (bin_mask.shape == references.shape), (
-            f"Mask must be same shape as images. Got {bin_mask.shape} (mask) and "
-            f"{references.shape} (images)."
+        if bin_mask is not None:
+            assert bin_mask.shape == references.shape, (
+                f"bin_mask must have the same shape as the images. "
+                f"Got mask={bin_mask.shape}, images={references.shape}."
+            )
+        assert tf.config.list_physical_devices("GPU"), (
+            "A CUDA-capable GPU is required. "
+            f"Detected: {tf.config.list_physical_devices('GPU')}."
         )
-        # TODO: CPU cannot support edges of meshes in function gather_nd() --> Only sample from "valid" region
-        assert tf.config.list_physical_devices(
-            "GPU"
-        ), f"GPU must be available. Got {tf.config.list_physical_devices('GPU')}."
-        if loss not in ["SSIM"]:
+        if loss_type not in ("SSIM",):
             warnings.warn(
-                f"Loss function {loss} is not test. Recommended to use `SSIM` instead."
+                f"Loss '{loss_type}' is untested. 'SSIM' is recommended.",
+                UserWarning,
+                stacklevel=2,
             )
 
-        # Initialize
-        self.save_glimpses_file_path = (
-            save_glimpses_file_path  # Rohit added this for debugging
-        )
+        # ------------------------------------------------------------------
+        # File paths
+        # ------------------------------------------------------------------
+        self.save_glimpses_file_path = save_glimpses_file_path
         self.save_transform_file_path = save_transform_file_path
 
-        if save_glimpses_file_path is not None and os.path.exists(
-            save_glimpses_file_path
-        ):
-            os.remove(save_glimpses_file_path)
-        if save_transform_file_path is not None and os.path.exists(
-            save_transform_file_path
-        ):
-            os.remove(save_transform_file_path)
+        for path in (save_glimpses_file_path, save_transform_file_path):
+            if path is not None and os.path.exists(path):
+                os.remove(path)
 
-
+        # ------------------------------------------------------------------
+        # Store settings
+        # ------------------------------------------------------------------
         self.num_layers = num_layers
         self.num_neurons = num_neurons
-        self.references = references.astype("float32")  # TensorFlow prefers float32
-        print("self.references.shape:", self.references.shape)
-        self.num_images = 1
-        print("self.num_images:", self.num_images)
-        self.images = images.astype("float32")
-        self.bin_mask = bin_mask
-        self.loss = loss
+        self.loss_type = loss_type
+        self.batch_size = batch_size
+        self.LR = LR
+        self.LR_sched = LR_sched
+        self.pos_encoding_L = pos_encoding_L
+        self.smoothness_weight = smoothness_weight
+        self.smoothness_radius = smoothness_radius
+        self.rigidity_weight = rigidity_weight
+        self.num_images = 1 
 
+        # ------------------------------------------------------------------
+        # Expand dims: work internally as (C, H, W)
+        # ------------------------------------------------------------------
+        refs = references.astype("float32")
+        imgs = images.astype("float32")
 
-        if self.references.ndim == 2:
-            self.references = np.expand_dims(self.references, axis=0) 
-        if self.images.ndim == 2:
-            self.images = np.expand_dims(self.images, axis=0)
-        # if self.bin_mask is not None and self.bin_mask.ndim == 2:
-        #     ic("here 2")
-        #     self.bin_mask = np.expand_dims(self.bin_mask, axis=0)
-        # if self.bin_mask is None:
-        #     ic("here 1")
-        #     self.bin_mask = np.ones(self.references.shape[1:3], dtype=np.uint8)
+        if refs.ndim == 2:
+            refs = np.expand_dims(refs, axis=0)
+        if imgs.ndim == 2:
+            imgs = np.expand_dims(imgs, axis=0)
 
+        mask = bin_mask
+        if mask is not None and mask.ndim == 2:
+            mask = np.expand_dims(mask, axis=0)
 
-        if self.bin_mask is not None and self.bin_mask.ndim == 2:
-            ic("here 2")
-            self.bin_mask = np.expand_dims(self.bin_mask, axis=0)
-
-        # Gets the number of images (for our purposes, we are just using the first channel) - num_images is referring to the number of images
-        # images input is (C, H, W)
-
-        self.batch_size=batch_size
-        self.LR=LR
-        self.LR_sched=LR_sched
-
-        ic(self.references.shape)
-        ic(self.images.shape)
-        # ic(self.bin_mask.shape)
-        ic(pool)
-        # ic(self.image_height)
-        # ic(self.image_width)
-        ic(self.references.astype("float")[:, :, :, None].shape)
-
-        self.pos_encoding_L = 10
-
-        # Pooling to reduce image size
-        if (pool is not None) and (pool > 1):
+        # ------------------------------------------------------------------
+        # Optional average pooling to reduce resolution during training
+        # ------------------------------------------------------------------
+        if pool is not None and pool > 1:
             self.pool = pool
-
-            # This snippet downsamples.a grayscale imageusing average pooling
-            # 1. Converts to a tensor
-            # 2. Adds a new dimension of size 1 at the end of the array, then pools on that tensor
-            # (TF expects a tensor of rank N+2, of shape [batch_size + input_spatial_shape + [num_channels]])
-            # So for our input 2D images, it needs a rank of N + 2 = 4
-            # So expects a shape of [batch_size, height, width, channels] -> batch_size and channels are both 1
-            # 3. Runs average pooling and then gets it back to [batch_size, height, width]
             with tf.device("/CPU:0"):
-                self.references = (
-                    tf.squeeze(  # Remove all size 1 dimensions - so if there's only one channel i.e. (1, 500, 500) -> will become (500, 500)
-                        (
-                            tf.nn.avg_pool(  # Uses mean pooling based on self.pool
-                                self.references.astype("float")[:, :, :, None],
-                                ksize=[
-                                    self.pool,
-                                    self.pool,
-                                ],  # not sure if this works - ValueError: ksize should be of length 1, 3 or 5. Received: ksize=[3, 3] of length 2 is i pass in self.pool = 3
-                                strides=[
-                                    self.pool,
-                                    self.pool,
-                                ],  # ksize determines window, strides determine how far the window moves after each calculation
-                                padding="SAME",  # VALID is no padding, SAME ensures that ouptut size matches input size divided by stride (makes sense because image_height and image_width have to remain the same)
-                                # pooling probably speeds up computation (but not sure if this is necessary? could just take alignment at highest resolution and downsample manually?)
-                            )
-                        ),
-                        axis=-1,  # removes the last dimsension of the tensor - so will remove the None slice that we added earlier
-                    )
-                    .numpy()
-                    .astype("float32")
-                )
-                # Same thing here as for references
-                self.images = (
-                    tf.squeeze(
-                        (
-                            tf.nn.avg_pool(
-                                self.images.astype("float")[:, :, :, None],
-                                ksize=[self.pool, self.pool],
-                                strides=[self.pool, self.pool],
-                                padding="SAME",
-                            )
-                        ),
-                        axis=-1,
-                    )
-                    .numpy()
-                    .astype("float32")
-                )
-                # Same thing here as for references
-                if self.bin_mask is not None:
-                        self.bin_mask = (
-                            tf.squeeze(
-                                (
-                                    tf.nn.avg_pool(
-                                        self.bin_mask.astype("float")[None, :, :, None],
-                                        ksize=[self.pool, self.pool],
-                                        strides=[self.pool, self.pool],
-                                        padding="SAME",
-                                    )
-                                )
-                            )
-                            .numpy()
-                            .astype("int32")
-                        )
-                # Default mask created AFTER pooling, at pooled resolution
-                if self.bin_mask is None:
-                    self.bin_mask = np.ones(self.references.shape[1:3], dtype=np.uint8)
-        else:
-            # Default is no pooling
-            self.pool = 1
-            if self.bin_mask is None:
-                self.bin_mask = np.ones(self.references.shape[1:3], dtype=np.uint8)
+                refs = self._avg_pool(refs)
+                imgs = self._avg_pool(imgs)
+                if mask is not None:
+                    mask = self._avg_pool_mask(mask)
 
-        # Brings offset and pad down based on pooling factor - again why is pooling necessary? is it to smooth things out?
+            if mask is None:
+                mask = np.ones(refs.shape[1:3], dtype=np.uint8)
+        else:
+            self.pool = 1
+            if mask is None:
+                mask = np.ones(refs.shape[1:3], dtype=np.uint8)
+
+        self.references = refs
+        self.images = imgs
+        self.bin_mask = mask
+
+        # ------------------------------------------------------------------
+        # Scale offset and pad to pooled resolution
+        # ------------------------------------------------------------------
         self.offset = int(offset / self.pool)
         self.pad = int(pad / self.pool)
 
-        
-        self.image_height = self.references.shape[
-            1
-        ]  # All channels should have the same dimensions
+        self.image_height = self.references.shape[1]
         self.image_width = self.references.shape[2]
 
-        print("self.image_height:", self.image_height)
-        print("self.image_width:", self.image_width)
+        # ------------------------------------------------------------------
+        # Per-channel coefficients
+        # ------------------------------------------------------------------
+        self.coeff = (
+            np.ones(self.num_images) if coeff is None else np.asarray(coeff)
+        )
 
-        # Gives weight to specific images? Not entirely sure why
-        if coeff is None:
-            self.coeff = np.ones(self.num_images)
-        else:
-            self.coeff = np.asarray(coeff)
-
-        # Initalizes NN layers
-        self.layers_custom = []
-        # Sets random weights to each of the layers - Glorot Normal draws weights from a normal distribution
-        # Variance of the distribution is scaled based on the number of input and output neurons of the layer, meaning that the variance of the acitvations
-        # and backprop gradients (signals don't grow or shrink too quickly)
-        # Var = 2 / (num_neurons_in + num_neurons_out) -> apparently goes well with sigmoid and tanh
-        self.initializer = tf.keras.initializers.GlorotNormal(seed=42 )
-
-        # Runs through layers
-        for i in range(self.num_layers):
-            # appends each layer to the list of layers
-            self.layers_custom.append(
-                # Creates a dense layer -> fully connected layer to approximate a continuous function
-                # We choose a dense layer here because we're not trying to learn image features but a non_linear mapping from coordinates to a transformation vector
-                # Dense layers are flexible
-                tf.keras.layers.Dense(
-                    units=self.num_neurons,
-                    kernel_initializer=self.initializer,
-                    bias_initializer=self.initializer,
-                )
+        # ------------------------------------------------------------------
+        # MLP layers
+        # ------------------------------------------------------------------
+        self.initializer = tf.keras.initializers.GlorotNormal()
+        self.layers_custom = [
+            tf.keras.layers.Dense(
+                units=self.num_neurons,
+                kernel_initializer=self.initializer,
+                bias_initializer=self.initializer,
             )
+            for _ in range(self.num_layers)
+        ]
 
-        # These are the final two layer
-        # Vec Layer are the x, y shifts that are determined by the NN
-        # We set them to 0 because we start with no shift at all
+        # Output heads — initialised to zero so the model starts with no shift
         self.vec_layer = tf.keras.layers.Dense(
             units=2,
             kernel_initializer=tf.keras.initializers.Zeros(),
             bias_initializer=tf.keras.initializers.Zeros(),
         )
-        # This provides a confidence score - again we are not confident at all about anything so we set them to zeroes initially
-        # We only need units = 1 because this corresponds to each vector in vec_layer
         self.sig_layer = tf.keras.layers.Dense(
             units=1,
             kernel_initializer=tf.keras.initializers.Zeros(),
             bias_initializer=tf.keras.initializers.Zeros(),
         )
-        self.y_mesh, self.x_mesh = np.meshgrid(
-            np.arange(-self.offset - self.pad, self.offset + self.pad + 1),
-            np.arange(-self.offset - self.pad, self.offset + self.pad + 1),
-        )
 
-
-        initial_log_scale_factor = np.log(3.0)
+        # Learnable scale factor for the confidence (sigma) head
         self.log_sig_scale_factor = tf.Variable(
-            initial_value=initial_log_scale_factor, trainable=True, name="sig_scale_factor_log", dtype=tf.float32
+            initial_value=np.log(3.0),
+            trainable=True,
+            name="log_sig_scale_factor",
+            dtype=tf.float32,
         )
-        logger.info("before dissim map")
-        # ref_blur = skimage.filters.gaussian(self.references[0], sigma=5)
-        # img_blur = skimage.filters.gaussian(self.images[0], sigma=5)
-        # dissimilarity_map = np.abs(ref_blur - img_blur)
 
-        # self.dissimilarity_map = (dissimilarity_map / dissimilarity_map.max()).astype(
-        #     "float32"
-        # )
+        # ------------------------------------------------------------------
+        # Glimpse offset meshes
+        #
+        # NOTE on naming convention used throughout this class:
+        #   row_mesh  — integer offsets along the HEIGHT axis (axis-0 in arrays)
+        #   col_mesh  — integer offsets along the WIDTH  axis (axis-1 in arrays)
+        #
+        # np.meshgrid(a, b) returns (grid_of_a_varying_along_cols,
+        #                            grid_of_b_varying_along_rows).
+        # We therefore call it as meshgrid(col_range, row_range) and unpack
+        # as (col_mesh, row_mesh).
+        # ------------------------------------------------------------------
+        span = np.arange(-self.offset - self.pad, self.offset + self.pad + 1)
+        self.col_mesh, self.row_mesh = np.meshgrid(span, span)
 
-        sigma = 5
+        # ------------------------------------------------------------------
+        # Dissimilarity map (blurred absolute difference) used as a spatial
+        # feature fed to the network alongside positional encoding.
+        # ------------------------------------------------------------------
+        sigma = dissim_sigma if dissim_sigma is not None else max(offset, 5)
 
-        # 1. Apply Gaussian blurring to the reference image
-        # OpenCV requires float-like types for Gaussian blur output when sigma is large
         ref_blur = cv2.GaussianBlur(
-            self.references[0].astype(np.float32), 
-            ksize=(0, 0), 
-            sigmaX=sigma, 
-            sigmaY=sigma
+            self.references[0].astype(np.float32),
+            ksize=(0, 0),
+            sigmaX=sigma,
+            sigmaY=sigma,
         )
-
-        # 2. Apply Gaussian blurring to the input image
         img_blur = cv2.GaussianBlur(
-            self.images[0].astype(np.float32), 
-            ksize=(0, 0), 
-            sigmaX=sigma, 
-            sigmaY=sigma
+            self.images[0].astype(np.float32),
+            ksize=(0, 0),
+            sigmaX=sigma,
+            sigmaY=sigma,
+        )
+        diff = np.abs(ref_blur - img_blur)
+        dmax = diff.max()
+        self.dissimilarity_map = (diff / dmax if dmax > 0 else diff).astype(
+            "float32"
         )
 
-        # 3. Calculate the absolute difference (dissimilarity map)
-        # Ensure the blurred images are of the same type for subtraction
-        dissimilarity_map = np.abs(ref_blur - img_blur)
+    # -----------------------------------------------------------------------
+    # Private helpers
+    # -----------------------------------------------------------------------
 
-        # 4. Normalize and set the data type (equivalent to your original normalization)
-        # Avoid division by zero: check if the max is zero before normalizing
-        map_max = dissimilarity_map.max()
-        if map_max > 0:
-            self.dissimilarity_map = (dissimilarity_map / map_max).astype("float32")
-        else:
-            self.dissimilarity_map = dissimilarity_map.astype("float32")
-        logger.info("after dissim map")
-
-        """
-        ic| self.y_mesh: <tf.Tensor: shape=(49, 49), dtype=int32, numpy=
-                 array([[-24, -23, -22, ...,  22,  23,  24],
-                        [-24, -23, -22, ...,  22,  23,  24],
-                        [-24, -23, -22, ...,  22,  23,  24],
-                        ...,
-                        [-24, -23, -22, ...,  22,  23,  24],
-                        [-24, -23, -22, ...,  22,  23,  24],
-                                [-24, -23, -22, ...,  22,  23,  24]], dtype=int32)>
-            self.x_mesh: <tf.Tensor: shape=(49, 49), dtype=int32, numpy=
-                        array([[-24, -24, -24, ..., -24, -24, -24],
-                                [-23, -23, -23, ..., -23, -23, -23],
-                                [-22, -22, -22, ..., -22, -22, -22],
-                                ...,
-                                [ 22,  22,  22, ...,  22,  22,  22],
-                                [ 23,  23,  23, ...,  23,  23,  23],
-                                [ 24,  24,  24, ...,  24,  24,  24]], dtype=int32)>
-        ic| self.y_mesh.shape: TensorShape([49, 49])
-            self.x_mesh.shape: TensorShape([49, 49])
-        
-        """
-
-    def get_glimpses(self, x_ind: np.ndarray, y_ind: np.ndarray):
-        """
-        Computes pixel glimpses using pure NumPy operations.
-        Replicates TF's behavior by returning 0 for out-of-bounds pixels.
-        """
-        # print("image_height:", self.image_height)
-        # print("image_width:", self.image_width)
-        # print("x_ind range:", x_ind.min(), x_ind.max())
-        # print("y_ind range:", y_ind.min(), y_ind.max())
-        # print("x_mesh range:", self.x_mesh.min(), self.x_mesh.max())
-        # print("references shape:", self.references.shape)
-        
-        # 1. Create coordinate grids
-        X = (
-            self.x_mesh[np.newaxis, :, :] + x_ind[:, np.newaxis, np.newaxis]
-        )
-        Y = (
-            self.y_mesh[np.newaxis, :, :] + y_ind[:, np.newaxis, np.newaxis]
-        )
-        # print("X shape:", X.shape, "X range:", X.min(), X.max())
-        # print("Y shape:", Y.shape, "Y range:", Y.min(), Y.max())
-
-        # 2. Create in-bounds masks
-        X_in_bounds = (X >= 0) & (X < self.image_width)
-        Y_in_bounds = (Y >= 0) & (Y < self.image_height)
-
-        all_in_bounds = X_in_bounds & Y_in_bounds  # Shape: (batch_size, H, W)
-
-        # 3. Create "safe" indices (clipped) to avoid indexing errors
-        X_safe = np.clip(X, 0, self.image_width - 1).astype(np.int64)
-        Y_safe = np.clip(Y, 0, self.image_height - 1).astype(np.int64)
-        # print("X_safe range:", X_safe.min(), X_safe.max())
-        # print("Y_safe range:", Y_safe.min(), Y_safe.max())
-
-        # 4. Gather for 'pixel_glimpses_float'
-        glimpses_list = []
-        for image_ind in range(self.num_images):
-            # Gather *all* values using safe indices (and TF's [X, Y] indexing)
-            # all_values = self.references[image_ind][X_safe, Y_safe]
-            all_values = self.references[image_ind][Y_safe, X_safe]
-            
-            # Use the mask: where in-bounds, use the gathered value, else use 0
-            glimpse = np.where(all_in_bounds, all_values, 0)
-            glimpses_list.append(glimpse)
-
-        pixel_glimpses_float = np.concatenate(glimpses_list, axis=0)
-
-        # 5. Reshape
-        pixel_glimpses_float = np.transpose(
-            np.stack(
-                np.split(
-                    pixel_glimpses_float, self.num_images, axis=0
+    def _avg_pool(self, arr: np.ndarray) -> np.ndarray:
+        """Average-pool a (C, H, W) float32 array by self.pool. Returns float32."""
+        return (
+            tf.squeeze(
+                tf.nn.avg_pool(
+                    arr.astype("float64")[:, :, :, None],
+                    ksize=[self.pool, self.pool],
+                    strides=[self.pool, self.pool],
+                    padding="SAME",
                 ),
                 axis=-1,
-            ),
-            axes=[3, 1, 2, 0] # (num_images, H, W, batch_size)
+            )
+            .numpy()
+            .astype("float32")
         )
 
-        # 6. Do the same for 'pixel_glimpses_ref'
-        
-        # Slice the *original* coordinates
-        X_offset = X[:, self.offset : -self.offset, self.offset : -self.offset]
-        Y_offset = Y[:, self.offset : -self.offset, self.offset : -self.offset]
-        
-        # Create in-bounds masks for the *sliced* coordinates
-        X_off_in_bounds = (X_offset >= 0) & (X_offset < self.image_width)
-        Y_off_in_bounds = (Y_offset >= 0) & (Y_offset < self.image_height)
-        all_in_bounds_ref = X_off_in_bounds & Y_off_in_bounds # Shape: (batch_size, H_off, W_off)
-
-        # Create "safe" (clipped) indices for the *sliced* coordinates
-        X_offset_safe = np.clip(X_offset, 0, self.image_width - 1).astype(np.int64)
-        Y_offset_safe = np.clip(Y_offset, 0, self.image_height - 1).astype(np.int64)
-
-        # Gather for 'pixel_glimpses_ref'
-        glimpses_ref_list = []
-        for image_ind in range(self.num_images):
-            # Gather all values for the reference
-            all_values = self.images[image_ind][Y_offset_safe, X_offset_safe]
-            
-            # Use the mask: where in-bounds, use gathered value, else 0
-            glimpse = np.where(all_in_bounds_ref, all_values, 0)
-            glimpses_ref_list.append(glimpse)
-            
-        pixel_glimpses_ref = np.concatenate(glimpses_ref_list, axis=0)
-        
-        # 7. Reshape
-        pixel_glimpses_ref = np.transpose(
-            np.stack(np.split(pixel_glimpses_ref, self.num_images, axis=0), axis=-1),
-            axes=[3, 1, 2, 0] # (num_images, H_off, W_off, batch_size)
+    def _avg_pool_mask(self, mask: np.ndarray) -> np.ndarray:
+        """Average-pool a (H, W) binary mask by self.pool. Returns int32 (threshold 0.5)."""
+        pooled = (
+            tf.squeeze(
+                tf.nn.avg_pool(
+                    np.squeeze(mask).astype("float64")[None, :, :, None],
+                    ksize=[self.pool, self.pool],
+                    strides=[self.pool, self.pool],
+                    padding="SAME",
+                )
+            )
+            .numpy()
         )
+        return (pooled >= 0.5).astype("int32")
 
-        return pixel_glimpses_float, pixel_glimpses_ref
-    
-    def train(
-        self,
-        num_steps=int(np.power(2, 14)),
-        verbose=4,
+    # -----------------------------------------------------------------------
+    # Glimpse extraction
+    # -----------------------------------------------------------------------
+
+    def get_glimpses(
+        self, row_ind: np.ndarray, col_ind: np.ndarray
     ):
         """
-        ... (Docstring truncated)
+        Extract local image patches (glimpses) centred at given pixel locations.
+
+        Parameters
+        ----------
+        row_ind : np.ndarray, shape (B,)
+            Row (height-axis) indices of glimpse centres.
+        col_ind : np.ndarray, shape (B,)
+            Column (width-axis) indices of glimpse centres.
+
+        Returns
+        -------
+        pixel_glimpses_moving : np.ndarray, shape (num_images, H_full, W_full, B)
+            Glimpses from the moving image (full size, including offset region).
+        pixel_glimpses_fixed : np.ndarray, shape (num_images, H_pad, W_pad, B)
+            Glimpses from the fixed/reference image (padded region only).
         """
+        # Absolute row/col coordinates for every position in the glimpse grid
+        # Shape: (B, 2*(offset+pad)+1, 2*(offset+pad)+1)
+        rows = self.row_mesh[np.newaxis, :, :] + row_ind[:, np.newaxis, np.newaxis]
+        cols = self.col_mesh[np.newaxis, :, :] + col_ind[:, np.newaxis, np.newaxis]
 
-        print("bin_mask shape:", self.bin_mask.shape)
-        print("references shape:", self.references.shape)
-        print("dissimilarity_map shape:", self.dissimilarity_map.shape)
-        print("x_mesh shape:", self.x_mesh.shape)
-        print("offset:", self.offset, "pad:", self.pad)
+        # In-bounds masks
+        rows_ok = (rows >= 0) & (rows < self.image_height)
+        cols_ok = (cols >= 0) & (cols < self.image_width)
+        in_bounds = rows_ok & cols_ok
 
-        x_bin = np.where(self.bin_mask == 1)[0].astype("int32")
-        y_bin = np.where(self.bin_mask == 1)[1].astype("int32")
+        # Clipped (safe) indices for array lookup
+        rows_safe = np.clip(rows, 0, self.image_height - 1).astype(np.int64)
+        cols_safe = np.clip(cols, 0, self.image_width - 1).astype(np.int64)
 
-        optimizer = tf.keras.optimizers.AdamW(learning_rate=self.LR, weight_decay=1e-4)
+        # --- Moving image glimpses (full extent) ---
+        glimpses_moving = []
+        for c in range(self.num_images):
+            vals = self.references[c][rows_safe, cols_safe]
+            glimpses_moving.append(np.where(in_bounds, vals, 0))
 
-        loss_count = 0
-        count = 0
+        # Shape: (num_images, 2*(offset+pad)+1, 2*(offset+pad)+1, B)
+        pixel_glimpses_moving = np.transpose(
+            np.stack(glimpses_moving, axis=-1),
+            axes=[3, 1, 2, 0],
+        )
+
+        # --- Fixed/reference image glimpses (padded region only) ---
+        rows_off = rows[:, self.offset : -self.offset, self.offset : -self.offset]
+        cols_off = cols[:, self.offset : -self.offset, self.offset : -self.offset]
+
+        rows_off_ok = (rows_off >= 0) & (rows_off < self.image_height)
+        cols_off_ok = (cols_off >= 0) & (cols_off < self.image_width)
+        in_bounds_off = rows_off_ok & cols_off_ok
+
+        rows_off_safe = np.clip(rows_off, 0, self.image_height - 1).astype(np.int64)
+        cols_off_safe = np.clip(cols_off, 0, self.image_width - 1).astype(np.int64)
+
+        glimpses_fixed = []
+        for c in range(self.num_images):
+            vals = self.images[c][rows_off_safe, cols_off_safe]
+            glimpses_fixed.append(np.where(in_bounds_off, vals, 0))
+
+        pixel_glimpses_fixed = np.transpose(
+            np.stack(glimpses_fixed, axis=-1),
+            axes=[3, 1, 2, 0],
+        )
+
+        return pixel_glimpses_moving, pixel_glimpses_fixed
+
+    # -----------------------------------------------------------------------
+    # Training
+    # -----------------------------------------------------------------------
+
+
+    def train(self, num_steps: int = int(np.power(2, 14)), verbose: int = 4,
+              early_stop_patience: int = 500):
+        """
+        Train the MIRAGE displacement network.
+
+        Parameters
+        ----------
+        num_steps : int
+            Total number of gradient steps.
+        verbose : int
+            Log loss every ``verbose`` steps. Set to 0 to disable.
+        early_stop_patience : int
+            If > 0, stop training when the SSIM loss hasn't improved for this
+            many steps. The best weights (by SSIM loss) are restored at the end.
+            Set to 0 to disable early stopping.
+        """
+        row_bin = np.where(self.bin_mask == 1)[0].astype("int32")
+        col_bin = np.where(self.bin_mask == 1)[1].astype("int32")
+
+        optimizer = tf.keras.optimizers.AdamW(
+            learning_rate=self.LR, weight_decay=1e-4
+        )
+
+        loss_accum = 0.0
+        step_count = 0
+
+        # Early stopping state
+        best_ssim_loss = float("inf")
+        best_weights = None
+        steps_without_improvement = 0
+        # Use a running window to smooth out noise
+        ssim_window = []
+        window_size = max(verbose, 16)
 
         tq = trange(num_steps, leave=True, desc="")
-        for _ in tq:
-            if (self.LR_sched) and (_ == int(num_steps * 0.75)):
+        for step in tq:
+            if self.LR_sched and step == int(num_steps * 0.75):
                 optimizer.learning_rate.assign(self.LR * 0.1)
 
-            high = min(x_bin.shape[0], 2**31 - 1)
+            high = min(row_bin.shape[0], 2**31 - 1)
             sample_ind = np.random.randint(
-                size=self.batch_size, low=0, high=high, dtype=np.int32
+                low=0, high=high, size=self.batch_size, dtype=np.int32
             )
 
-            # Get image-space indices for the center of the glimpse
-            x_ind_img = x_bin[sample_ind]
-            y_ind_img = y_bin[sample_ind]
+            row_ind = row_bin[sample_ind]
+            col_ind = col_bin[sample_ind]
 
-            # Get feature inputs at these locations
-            dissimilarity_vals = self.dissimilarity_map[x_ind_img, y_ind_img]
+            dissimilarity_vals = self.dissimilarity_map[row_ind, col_ind]
 
-            pixel_glimpses_float, pixel_glimpses_ref = self.get_glimpses(
-                y_ind_img, x_ind_img
+            pixel_glimpses_moving, pixel_glimpses_fixed = self.get_glimpses(
+                row_ind, col_ind
             )
 
-            # Normalize the indices to be between 0 and 1
-            x_ind_norm = x_ind_img / self.references.shape[1]
-            y_ind_norm = y_ind_img / self.references.shape[2]
+            row_norm = row_ind / self.image_height
+            col_norm = col_ind / self.image_width
 
             with tf.GradientTape() as tape:
-                vec, sig = self.forward_pass(
-                    x_ind_norm, y_ind_norm, dissimilarity_vals
-                )  # Updated forward_pass call
+                vec, sig = self.forward_pass(row_norm, col_norm, dissimilarity_vals)
                 output_offset = self.vec_to_field(vec, sig)
-                loss = self.compute_loss(
-                    output_offset, pixel_glimpses_float, pixel_glimpses_ref
+                ssim_loss = self.compute_loss(
+                    output_offset, pixel_glimpses_moving, pixel_glimpses_fixed
                 )
+                loss = ssim_loss
+                if self.smoothness_weight > 0:
+                    loss = loss + self.smoothness_weight * self._smoothness_loss(vec, row_norm, col_norm)
+                if self.rigidity_weight > 0:
+                    loss = loss + self.rigidity_weight * self._rigidity_loss(vec, row_norm, col_norm)
 
             gradients = tape.gradient(loss, self.trainable_variables)
             optimizer.apply_gradients(zip(gradients, self.trainable_variables))
 
-            count += 1
-            loss_count += loss.numpy()
-            if (_ % verbose == 0) and (verbose > 0):
-                tq.set_description("%.5f" % (loss_count / count))
-                tq.refresh()
+            step_count += 1
+            loss_accum += loss.numpy()
+            ssim_val = ssim_loss.numpy()
 
-                loss_count = 0
-                count = 0
+            if verbose > 0 and step % verbose == 0:
+                tq.set_description(f"{loss_accum / step_count:.5f}")
+                tq.refresh()
+                loss_accum = 0.0
+                step_count = 0
+
+            # --- Early stopping logic ---
+            if early_stop_patience > 0:
+                ssim_window.append(ssim_val)
+                if len(ssim_window) > window_size:
+                    ssim_window.pop(0)
+
+                # Only evaluate after we have a full window
+                if len(ssim_window) == window_size:
+                    avg_ssim = sum(ssim_window) / window_size
+                    if avg_ssim < best_ssim_loss:
+                        best_ssim_loss = avg_ssim
+                        best_weights = [w.numpy().copy() for w in self.trainable_variables]
+                        steps_without_improvement = 0
+                    else:
+                        steps_without_improvement += 1
+
+                    if steps_without_improvement >= early_stop_patience:
+                        tq.set_description(f"Early stop at step {step} (best SSIM loss: {best_ssim_loss:.5f})")
+                        tq.close()
+                        break
+
+        # Restore best weights
+        if early_stop_patience > 0 and best_weights is not None:
+            for var, w in zip(self.trainable_variables, best_weights):
+                var.assign(w)
 
         return 0
 
-    def create_magnitude_heatmap(self):
-        """
-        Computes the dense transformation field and returns a 2D heatmap
-        of the displacement magnitude for each pixel.
-        """
-        h, w = self.references.shape[1], self.references.shape[2]
-        y_coords, x_coords = np.meshgrid(np.arange(h), np.arange(w), indexing="ij")
 
-        y_norm = y_coords.flatten().astype("float32") / h
-        x_norm = x_coords.flatten().astype("float32") / w
+    # -----------------------------------------------------------------------
+    # Forward pass
+    # -----------------------------------------------------------------------
 
-        # Predict the dense vector field in batches
-        batch_size = 4096
-        all_vecs = []
-        for i in trange(
-            0, len(x_norm), batch_size, leave=False, desc="Generating heatmap"
-        ):
-            vec_batch, _ = self.forward_pass(
-                tf.constant(y_norm[i : i + batch_size]),
-                tf.constant(x_norm[i : i + batch_size]),
-                tf.constant(
-                    self.dissimilarity_map[
-                        y_coords.flatten()[i : i + batch_size],
-                        x_coords.flatten()[i : i + batch_size],
-                    ]
-                ),
-            )
-            all_vecs.append(vec_batch.numpy())
-
-        # Calculate pixel shift magnitude
-        vec_field = np.concatenate(all_vecs, axis=0)
-        magnitude = np.linalg.norm(vec_field, axis=-1) * self.offset
-
-        return magnitude.reshape(h, w)
-
-    # Then modify forward_pass to use positional encoding:
     @tf.function
-    def forward_pass(self, x_ind_norm, y_ind_norm, dissimilarity_input):
-        # Normalize to [-1, 1] range
+    def forward_pass(
+        self,
+        row_norm: tf.Tensor,
+        col_norm: tf.Tensor,
+        dissimilarity_input: tf.Tensor,
+    ):
+        """
+        Run the MLP to predict displacement vectors and confidence scores.
+
+        Parameters
+        ----------
+        row_norm : tf.Tensor, shape (B,)
+            Row indices normalised to [0, 1].
+        col_norm : tf.Tensor, shape (B,)
+            Column indices normalised to [0, 1].
+        dissimilarity_input : tf.Tensor, shape (B,)
+            Local dissimilarity values at each glimpse centre.
+
+        Returns
+        -------
+        vec : tf.Tensor, shape (B, 2)   — displacement in [-1, 1]
+        sig : tf.Tensor, shape (B, 1)   — confidence scale
+        """
+        # Map [0, 1] → [-1, 1]
         coords_norm = tf.stack(
-            [
-                2 * x_ind_norm - 1,
-                2 * y_ind_norm - 1,
-            ],
-            axis=1,
+            [2.0 * row_norm - 1.0, 2.0 * col_norm - 1.0], axis=1
         )
 
-        # 1. Positional Encoding
         pos_encoded = get_positional_encoding(coords_norm, L=self.pos_encoding_L)
 
-        # 2. Concatenate with learned features and static image features
         output = tf.concat(
             [
-                # tf.cast(pos_encoded, tf.float32),
-                tf.cast(coords_norm, tf.float32),  # Also keep raw coordinates
+                tf.cast(coords_norm, tf.float32),
                 tf.cast(dissimilarity_input[:, None], tf.float32),
+                tf.cast(pos_encoded, tf.float32),
             ],
             axis=1,
         )
 
-        for i in range(self.num_layers):
-            output = tf.nn.silu(self.layers_custom[i](output))
+        for layer in self.layers_custom:
+            output = tf.nn.silu(layer(output))
 
         vec_output = tf.nn.tanh(self.vec_layer(output))
-        # Use tf.exp(log_sig_scale_factor) for positive scale factor
-        sig_output = (tf.nn.softplus(self.sig_layer(output)) + 0.001) / tf.math.exp(self.log_sig_scale_factor)
+        sig_output = (
+            tf.nn.softplus(self.sig_layer(output)) + 0.001
+        ) / tf.math.exp(self.log_sig_scale_factor)
 
-        return (vec_output, sig_output)
+        return vec_output, sig_output
+
+    # -----------------------------------------------------------------------
+    # Displacement field
+    # -----------------------------------------------------------------------
 
     @tf.function
-    def vec_to_field(self, vec, sig):
-        # ic(vec.shape)
-        # ic(sig.shape)
-        # vec has shape (512, 2)
-        # sig has shape(512, 1)
-        # ic(sig)
+    def vec_to_field(self, vec: tf.Tensor, sig: tf.Tensor) -> tf.Tensor:
+        """
+        Convert predicted vectors and confidence scores into a soft
+        probability distribution over the (2*offset+1)^2 displacement grid.
+
+        Parameters
+        ----------
+        vec : tf.Tensor, shape (B, 2)
+        sig : tf.Tensor, shape (B, 1)
+
+        Returns
+        -------
+        tf.Tensor, shape (B, 2*offset+1, 2*offset+1)
+        """
         epsilon = 1e-6
-        # for each glimpse, gets an x, y transformation from vec and a corresponding sig that is a confidence score
-        x_dist = (
-            # Squaring ensures all distances are positive and gives greater weight to larger differences
-            # we just want the magnitude, the direction does not matter
-            # we want to penalize deviation, so squaring brings the distance down
-            tf.square(
-                # linspace creates a 1d tensor from -1 to 1 with evenly spaced numbers that correspond to the number of offset pixels
-                # in both directions
-                # this is then casted so that theres a new dimention -> leading to a (1, <number_of_offset_pixels>)
-                tf.cast(tf.linspace(-1, 1, 2 * self.offset + 1), dtype=tf.float32)[
-                    None, :
-                ]
-                # this is X so then we subtract the vec x coordinate to get the distance between original and new coordinates
-                # we end up with a grid in the [-1, 1] range and each column is the predicted x_shift
-                - vec[:, 0][:, None]
-            )
-            / (sig + epsilon)
+        grid = tf.cast(
+            tf.linspace(-1.0, 1.0, 2 * self.offset + 1), dtype=tf.float32
         )
 
-        # same thing as for x_dist
-        y_dist = (
-            tf.square(
-                tf.cast(tf.linspace(-1, 1, 2 * self.offset + 1), dtype=tf.float32)[
-                    None, :
-                ]
-                - vec[:, 1][:, None]
-            )
-            / (sig + epsilon)
-        )
+        # Squared distance from predicted shift along each axis
+        # Shapes: (B, 2*offset+1)
+        row_dist = tf.square(grid[None, :] - vec[:, 0][:, None]) / (sig + epsilon)
+        col_dist = tf.square(grid[None, :] - vec[:, 1][:, None]) / (sig + epsilon)
 
-        # both dists becomes a tensor of size (512, 25, 1) + [512, 25, 1] so they can be added
-        # For each glimpse we have a [25, 25] grid that represents the combined squared distance from the original position
-        field = x_dist[:, :, None] + y_dist[:, None, :]
+        # Outer sum → (B, 2*offset+1, 2*offset+1)
+        field = row_dist[:, :, None] + col_dist[:, None, :]
 
-        # plt.imshow(field[0])
-        # plt.show()
-        # plt.title("Field before softmax")
-        # plt.savefig("field_before_softmax.png")
-        # final reshape takes the 1D tensor of distances and brings it back to (512, 25, 25)
-        # these 2d slices now have values between 0 and 1 that represent the shift values
+        # --- LOGIC CHANGE (bug fix) ---
+        # Original code used `vec.shape[0]` (static Python int) inside
+        # @tf.function, which fails when the batch dimension is dynamic (None
+        # at graph-tracing time).  We use `tf.shape(vec)[0]` instead so that
+        # the reshape always uses the runtime batch size.
+        batch = tf.shape(vec)[0]
+        n = 2 * self.offset + 1
         field = tf.reshape(
-            # inner reshape takes the field (512, 25, 25) and flattens it -> new shape is (512, 25 * 25)
-            # we then negate that so that smaller distances become a larger magnitude and further distances become smaller in
-            # this gets passed into the softmax function whihc converts these values in a probability distribtution - all output values for each glimpse sum to 1
-            # the most probable transofmation will be the one that minimizes the shift while shifts that dramatically shift the pixels will be penalized
-            tf.nn.softmax(-tf.reshape(field, [vec.shape[0], -1]), axis=-1),
-            [vec.shape[0], 2 * self.offset + 1, 2 * self.offset + 1],
+            tf.nn.softmax(-tf.reshape(field, [batch, -1]), axis=-1),
+            [batch, n, n],
         )
-
-        # plt.show()
-
-        # plt.title("Field after softmax")
-        # plt.savefig("field_after_softmax.png")
 
         return field
 
+    # -----------------------------------------------------------------------
+    # Loss
+    # -----------------------------------------------------------------------
+
     @tf.function
-    def compute_loss(self, output_offset, pixel_glimpses_float, pixel_glimpses_ref):
-        pixel_glimpses_float = tf.nn.depthwise_conv2d(
-            pixel_glimpses_float,
+    def compute_loss(
+        self,
+        output_offset: tf.Tensor,
+        pixel_glimpses_moving: tf.Tensor,
+        pixel_glimpses_fixed: tf.Tensor,
+    ) -> tf.Tensor:
+        """Apply the displacement field and compute the training loss."""
+        # Convolve the moving glimpse with the predicted displacement kernel
+        pixel_glimpses_moving = tf.nn.depthwise_conv2d(
+            pixel_glimpses_moving,
             tf.transpose(output_offset, [1, 2, 0])[:, :, :, None],
             strides=[1, 1, 1, 1],
             padding="VALID",
         )
-        # pixel_glimpses_float shape is (1, 25, 25, 512)
 
+        if self.loss_type == "SSIM":
+            return self._ssim_loss(pixel_glimpses_moving, pixel_glimpses_fixed)
 
-        if self.loss == "MultiSSIM":
-            return self.multi_ssim(pixel_glimpses_float, pixel_glimpses_ref)
+        align_pixels = tf.reshape(pixel_glimpses_moving, [self.num_images, -1])
+        ref_pixels = tf.reshape(pixel_glimpses_fixed, [self.num_images, -1])
 
-        if self.loss == "SSIM":
-            return self.SSIM(pixel_glimpses_float, pixel_glimpses_ref)
-
-        align_pixels = tf.reshape(pixel_glimpses_float, [self.num_images, -1])
-        ref_pixels = tf.reshape(pixel_glimpses_ref, [self.num_images, -1])
-
-        if self.loss == "MSE":
-            return self.MSE(ref_pixels, align_pixels)
-        elif self.loss == "NormCorr":
-            return self.norm_corr_loss(ref_pixels, align_pixels)
+        if self.loss_type == "MSE":
+            return self._mse_loss(ref_pixels, align_pixels)
+        elif self.loss_type == "NormCorr":
+            return self._norm_corr_loss(ref_pixels, align_pixels)
         else:
-            return self.corr_loss(ref_pixels, align_pixels)
+            return self._corr_loss(ref_pixels, align_pixels)
+        
+    @tf.function
+    def _ssim_loss(self, align_glimpses: tf.Tensor, ref_glimpses: tf.Tensor) -> tf.Tensor:
+        pad = self.pad
+        align = tf.reshape(
+            tf.transpose(align_glimpses, [0, 3, 1, 2]),
+            [-1, pad * 2 + 1, pad * 2 + 1],
+        )
+        ref = tf.reshape(
+            tf.transpose(ref_glimpses, [0, 3, 1, 2]),
+            [-1, pad * 2 + 1, pad * 2 + 1],
+        )
+
+        if self.loss_type == "MultiSSIM" and pad >= 10:
+            # MS-SSIM needs minimum ~11px at each scale
+            # With pad=25 (51x51): supports 3 scales (51→25→12)
+            # With pad=12 (25x25): supports 2 scales (25→12)
+            max_scales = 1
+            size = pad * 2 + 1
+            while size // 2 >= 11:
+                max_scales += 1
+                size //= 2
+            # power_factors weights: last entry = luminance, all others = contrast+structure
+            # Default (0.0448, 0.2856, 0.3001, 0.2363, 0.1333) for 5 scales
+            # Truncate to however many scales we can support
+            default_weights = [0.0448, 0.2856, 0.3001, 0.2363, 0.1333]
+            weights = default_weights[:max_scales]
+            # Renormalise so they sum to 1
+            w_sum = sum(weights)
+            weights = [w / w_sum for w in weights]
+
+            val = tf.reshape(
+                tf.image.ssim_multiscale(
+                    ref[:, :, :, None], align[:, :, :, None],
+                    max_val=1.0, power_factors=weights,
+                ),
+                [self.num_images, -1],
+            )
+        else:
+            val = tf.reshape(
+                tf.image.ssim(
+                    ref[:, :, :, None], align[:, :, :, None], max_val=1.0,
+                ),
+                [self.num_images, -1],
+            )
+
+        return -tf.reduce_mean(val * self.coeff[:, None])
+
 
     @tf.function
-    def SSIM(self, align_glimpses, ref_glimpses):
-        align_glimpses = tf.reshape(
-            tf.transpose(align_glimpses, [0, 3, 1, 2]),
-            [-1, self.pad * 2 + 1, self.pad * 2 + 1],
-        )
-        ref_glimpses = tf.reshape(
-            tf.transpose(ref_glimpses, [0, 3, 1, 2]),
-            [-1, self.pad * 2 + 1, self.pad * 2 + 1],
-        )
-
-        ssim_val = tf.reshape(
-            tf.image.ssim(
-                ref_glimpses[:, :, :, None], align_glimpses[:, :, :, None], max_val=1.0
-            ),
-            [self.num_images, -1],
-        )
-        return -tf.reduce_mean(ssim_val * self.coeff[:, None])
-        
-
-    def compute_transform(self, num_cut=100_000):
+    def _smoothness_loss(self, vec: tf.Tensor, row_norm: tf.Tensor, col_norm: tf.Tensor) -> tf.Tensor:
         """
-        Calculate transformation for each pixel in memory-safe batches.
-        Always reconstructs at the original (pre-pool) resolution.
+        Penalise displacement differences between nearby pixel pairs.
+
+        For each pixel in the batch, we also evaluate the network at a
+        random neighbour within smoothness_radius.  The loss is the mean
+        squared difference between their predicted displacement vectors.
+        This enforces the prior that nearby pixels share similar shifts.
+        """
+        row_norm = tf.cast(row_norm, tf.float32)
+        col_norm = tf.cast(col_norm, tf.float32)
+
+        radius_row = tf.cast(self.smoothness_radius, tf.float32) / tf.cast(self.image_height, tf.float32)
+        radius_col = tf.cast(self.smoothness_radius, tf.float32) / tf.cast(self.image_width, tf.float32)
+
+        batch = tf.shape(row_norm)[0]
+        dr = tf.random.uniform([batch], -radius_row, radius_row)
+        dc = tf.random.uniform([batch], -radius_col, radius_col)
+
+        # Clamp neighbour coords to [0, 1]
+        row_nb = tf.clip_by_value(row_norm + dr, 0.0, 1.0)
+        col_nb = tf.clip_by_value(col_norm + dc, 0.0, 1.0)
+
+        # Look up dissimilarity at neighbour coords (nearest pixel)
+        row_px = tf.cast(tf.round(row_nb * tf.cast(self.image_height - 1, tf.float32)), tf.int32)
+        col_px = tf.cast(tf.round(col_nb * tf.cast(self.image_width - 1, tf.float32)), tf.int32)
+        dissim_nb = tf.gather_nd(self.dissimilarity_map, tf.stack([row_px, col_px], axis=1))
+
+        vec_nb, _ = self.forward_pass(row_nb, col_nb, dissim_nb)
+
+        return tf.reduce_mean(tf.square(vec - vec_nb))
+    
+    @tf.function
+    def _rigidity_loss(self, vec: tf.Tensor, row_norm: tf.Tensor, col_norm: tf.Tensor) -> tf.Tensor:
+        """
+        Penalise local area change by enforcing det(Jacobian) ≈ 1.
+
+        Uses finite differences: evaluates the network at (r+eps, c) and
+        (r, c+eps) to estimate the four partial derivatives of the
+        displacement field, then computes det(J) and penalises deviation
+        from 1.
+        """
+        row_norm = tf.cast(row_norm, tf.float32)
+        col_norm = tf.cast(col_norm, tf.float32)
+
+        # One-pixel step in normalised coords
+        eps_r = 1.0 / tf.cast(self.image_height, tf.float32)
+        eps_c = 1.0 / tf.cast(self.image_width, tf.float32)
+
+        row_dr = tf.clip_by_value(row_norm + eps_r, 0.0, 1.0)
+        col_dc = tf.clip_by_value(col_norm + eps_c, 0.0, 1.0)
+
+        # Dissimilarity lookup helper
+        def _dissim_at(r, c):
+            rp = tf.cast(tf.round(r * tf.cast(self.image_height - 1, tf.float32)), tf.int32)
+            cp = tf.cast(tf.round(c * tf.cast(self.image_width - 1, tf.float32)), tf.int32)
+            return tf.gather_nd(self.dissimilarity_map, tf.stack([rp, cp], axis=1))
+
+        vec_dr, _ = self.forward_pass(row_dr, col_norm, _dissim_at(row_dr, col_norm))
+        vec_dc, _ = self.forward_pass(row_norm, col_dc, _dissim_at(row_norm, col_dc))
+
+        # Partial derivatives of displacement
+        du_dr = (vec_dr[:, 0] - vec[:, 0]) / eps_r
+        dv_dr = (vec_dr[:, 1] - vec[:, 1]) / eps_r
+        du_dc = (vec_dc[:, 0] - vec[:, 0]) / eps_c
+        dv_dc = (vec_dc[:, 1] - vec[:, 1]) / eps_c
+
+        # det(J) = (1 + du/dr)(1 + dv/dc) - (du/dc)(dv/dr)
+        det_J = (1.0 + du_dr) * (1.0 + dv_dc) - du_dc * dv_dr
+
+        return tf.reduce_mean(tf.square(det_J - 1.0))
+
+
+
+    # -----------------------------------------------------------------------
+    # Magnitude heatmap (diagnostic)
+    # -----------------------------------------------------------------------
+
+    def create_magnitude_heatmap(self) -> np.ndarray:
+        """
+        Compute a dense displacement-magnitude heatmap at the training resolution.
+
+        Returns
+        -------
+        np.ndarray, shape (H, W)
+            Per-pixel displacement magnitude in pixels.
+        """
+        h, w = self.image_height, self.image_width
+        # indexing="ij" → first output varies along rows, second along cols
+        row_coords, col_coords = np.meshgrid(
+            np.arange(h), np.arange(w), indexing="ij"
+        )
+
+        row_norm = row_coords.flatten().astype("float32") / h
+        col_norm = col_coords.flatten().astype("float32") / w
+        dissim_flat = self.dissimilarity_map[
+            row_coords.flatten(), col_coords.flatten()
+        ]
+
+        batch_size = 4096
+        all_vecs = []
+        for i in trange(0, len(row_norm), batch_size, leave=False, desc="Generating heatmap"):
+            vec_batch, _ = self.forward_pass(
+                tf.constant(row_norm[i : i + batch_size]),
+                tf.constant(col_norm[i : i + batch_size]),
+                tf.constant(dissim_flat[i : i + batch_size]),
+            )
+            all_vecs.append(vec_batch.numpy())
+
+        vec_field = np.concatenate(all_vecs, axis=0)
+        magnitude = np.linalg.norm(vec_field, axis=-1) * self.offset
+        return magnitude.reshape(h, w)
+
+    # -----------------------------------------------------------------------
+    # Transform computation and application
+    # -----------------------------------------------------------------------
+
+    def compute_transform(self, num_cut: int = 100_000) -> int:
+        """
+        Compute the dense pixel-level warp field at full (pre-pool) resolution.
+
+        The result is stored in ``self.full_transform`` as an (H, W, 2) array
+        of source coordinates (suitable for ``skimage.transform.warp``).
+
+        Parameters
+        ----------
+        num_cut : int
+            Number of pixels processed per batch to limit GPU memory use.
+
+        Returns
+        -------
+        int
+            0 on success.
         """
         pool = self.pool
+        h_pooled, w_pooled = self.image_height, self.image_width
+        h_full, w_full = h_pooled * pool, w_pooled * pool
 
-        # self.references is already at pooled resolution (H//pool, W//pool)
-        h_pooled = self.references.shape[1]
-        w_pooled = self.references.shape[2]
+        # Full-resolution pixel coordinates
+        row_v = np.arange(h_full)
+        col_v = np.arange(w_full)
+        pixel_ind = np.stack(
+            np.meshgrid(row_v, col_v, indexing="ij"), axis=-1
+        ).reshape(-1, 2)   # (H*W, 2) — columns: [row, col]
 
-        h_full = h_pooled * pool
-        w_full = w_pooled * pool
+        row_norm_all = pixel_ind[:, 0] / float(h_full)
+        col_norm_all = pixel_ind[:, 1] / float(w_full)
 
-        # Full-res pixel coordinates
-        xv = np.arange(h_full)
-        yv = np.arange(w_full)
-        pixel_ind = np.stack(np.meshgrid(xv, yv, indexing="ij"), axis=-1).reshape(-1, 2)
-
-        # Normalize using full-res dimensions
-        x_norm_all = pixel_ind[:, 0] / float(h_full)
-        y_norm_all = pixel_ind[:, 1] / float(w_full)
-
-        t0 = time.time()
-        # Dissimilarity map is at pooled resolution - index with floor division
+        # Dissimilarity map is at pooled resolution
         dissim_all = self.dissimilarity_map[
             pixel_ind[:, 0] // pool,
             pixel_ind[:, 1] // pool,
         ]
-        print(f"Dissim map: {time.time()-t0:.4f}s")
 
         pixel_transform = np.zeros((pixel_ind.shape[0], 2), dtype=np.float32)
 
         t0 = time.time()
-        for start in trange(0, pixel_ind.shape[0], num_cut, leave=True, desc="Computing transform"):
+        for start in trange(
+            0, pixel_ind.shape[0], num_cut, leave=True, desc="Computing transform"
+        ):
             end = min(start + num_cut, pixel_ind.shape[0])
-
-            coords_x = tf.constant(x_norm_all[start:end], dtype=tf.float32)
-            coords_y = tf.constant(y_norm_all[start:end], dtype=tf.float32)
-            dissim = tf.constant(dissim_all[start:end], dtype=tf.float32)
-
-            vec_batch, _ = self.forward_pass(coords_x, coords_y, dissim)
-            # vec is in [-1,1], scale to full-res pixels
-            # self.offset = original_offset // pool, so * pool recovers full-res magnitude
+            vec_batch, _ = self.forward_pass(
+                tf.constant(row_norm_all[start:end], dtype=tf.float32),
+                tf.constant(col_norm_all[start:end], dtype=tf.float32),
+                tf.constant(dissim_all[start:end], dtype=tf.float32),
+            )
+            # vec is in [-1, 1]; scale to full-resolution pixels
             pixel_transform[start:end] = vec_batch.numpy() * self.offset * pool
 
-        print(f"Loop: {time.time()-t0:.4f}s")
-        t0 = time.time()
+        print(f"Transform loop: {time.time() - t0:.4f}s")
 
-        # Swap x/y axes to match image indexing convention
-        pixel_transform = pixel_transform[:, [1, 0]]
-
-        # Subtract displacement from pixel coords to get source coords
+        # vec[:, 0] = row displacement, vec[:, 1] = col displacement
+        # Source coords = destination coords - displacement
         new_ind = pixel_ind.astype(np.float32) - pixel_transform
-
-        # Reshape to full-res grid
         new_ind = new_ind.reshape(h_full, w_full, 2)
-
-        # Clamp to valid range
         new_ind[:, :, 0] = np.clip(new_ind[:, :, 0], 0, h_full - 1)
         new_ind[:, :, 1] = np.clip(new_ind[:, :, 1], 0, w_full - 1)
 
@@ -837,23 +925,30 @@ class MIRAGE(tf.keras.Model):
         if self.save_transform_file_path:
             np.save(self.save_transform_file_path, self.full_transform)
 
-        print(f"Final: {time.time()-t0:.4f}s")
         return 0
 
-    def apply_transform(self, image):
+    def apply_transform(self, image: np.ndarray) -> np.ndarray:
         """
-        Apply the transformation to an image.
+        Apply the computed warp field to an image.
+
+        Parameters
+        ----------
+        image : np.ndarray
+            Image to warp. Must match the full (pre-pool) resolution.
+
+        Returns
+        -------
+        np.ndarray
+            Warped image (float32, same shape as input).
         """
-        image_warped = skimage.transform.warp(
+        return skimage.transform.warp(
             image.astype("float32"),
-            np.array([self.full_transform[:, :, 0], self.full_transform[:, :, 1]]),
+            np.array(
+                [self.full_transform[:, :, 0], self.full_transform[:, :, 1]]
+            ),
             order=0,
         )
 
-        return image_warped
-
-    def get_transform(self):
-        """
-        Get the computed transformation field.
-        """
+    def get_transform(self) -> np.ndarray:
+        """Return the stored warp field (H, W, 2)."""
         return self.full_transform
