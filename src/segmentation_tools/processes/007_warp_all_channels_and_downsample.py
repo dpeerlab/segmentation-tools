@@ -1,5 +1,3 @@
-from icecream import ic
-import sys
 from loguru import logger
 import numpy as np
 from pathlib import Path
@@ -113,7 +111,7 @@ def warp_and_save_pyramidal_tiff(
     ONLY to the highest-resolution level (Level 0) data.
     """
 
-    ic(moving_image.shape, combined_transform.shape)
+    logger.info(f"Moving image shape: {moving_image.shape}, transform shape: {combined_transform.shape}")
     if moving_image.ndim == 2:
         moving_image = moving_image[np.newaxis, ...]  # (H, W) -> (1, H, W)
 
@@ -122,8 +120,7 @@ def warp_and_save_pyramidal_tiff(
     
     # Use the original image data as the input for the Level 0 processing
     input_channels = [moving_image[:, :, i] for i in range(moving_image.shape[-1])]
-    # ic(input_channels)
-    ic(input_channels[0].shape, combined_transform.shape, len(input_channels))
+    logger.info(f"Channel shape: {input_channels[0].shape}, transform shape: {combined_transform.shape}, n_channels: {len(input_channels)}")
     processed_channels = []
 
     # Iterate over channels and apply both operations

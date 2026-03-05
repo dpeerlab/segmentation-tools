@@ -115,16 +115,39 @@ python \
 
 # echo "High-res moving image warped."
 
+# Step 5b - Recommend MIRAGE parameters from tissue crops
+python \
+    /data1/peerd/ghoshr/segmentation_tools/src/segmentation_tools/processes/005b_recommend_mirage_params.py \
+    --warped-file-path ${CHECKPOINTS_DIR}/moving_dapi_linear_warped.npy \
+    --fixed-file-path ${CHECKPOINTS_DIR}/high_res_fixed_dapi_filtered_level_${HIGH_RES_LEVEL}.npy \
+    --crop-size 1000 \
+    --n-crops 5
+
+echo "MIRAGE parameter recommendation completed."
+
 BATCH_SIZE=1024
 LEARNING_RATE=0.012575
+NUM_STEPS=2048
 # Step 6 - MIRAGE
 python /data1/peerd/ghoshr/segmentation_tools/src/segmentation_tools/processes/006_run_mirage.py \
     --warped-file-path ${CHECKPOINTS_DIR}/moving_dapi_linear_warped.npy \
     --fixed-file-path ${CHECKPOINTS_DIR}/high_res_fixed_dapi_filtered_level_${HIGH_RES_LEVEL}.npy \
     --batch-size ${BATCH_SIZE} \
-    --learning-rate ${LEARNING_RATE}
+    --learning-rate ${LEARNING_RATE} \
+    --num-steps ${NUM_STEPS}
 
 echo "MIRAGE non-linear registration completed."
+
+# Step 6b - Evaluate MIRAGE alignment via centroid matching
+python \
+    /data1/peerd/ghoshr/segmentation_tools/src/segmentation_tools/processes/006b_evaluate_mirage_alignment.py \
+    --warped-file-path ${CHECKPOINTS_DIR}/moving_dapi_linear_warped.npy \
+    --fixed-file-path ${CHECKPOINTS_DIR}/high_res_fixed_dapi_filtered_level_${HIGH_RES_LEVEL}.npy \
+    --mirage-transform-path ${CHECKPOINTS_DIR}/mirage_transform.npy \
+    --crop-size 1000 \
+    --n-crops 5
+
+echo "MIRAGE alignment evaluation completed."
 
 # (Optional) - calculate SSIM and plot
 python \

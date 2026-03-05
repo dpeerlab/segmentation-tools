@@ -3,7 +3,7 @@ import numpy as np
 from pathlib import Path
 import mirage
 import argparse
-import os
+
 
 def run_mirage(
     warped_image,
@@ -18,26 +18,19 @@ def run_mirage(
     batch_size=1024,
     num_steps=2048,
     lr=0.001,
+    smoothness_weight=0.1,
+    smoothness_radius=30,
+    pos_encoding_L=6,
+    dissim_sigma=None,
 ):
-    """
-    Run MIRAGE alignment on the given images.
+    """Run MIRAGE alignment on the given images.
 
-    Parameters:
-        warped_image: The warped image to align.
-        fixed_image: The fixed image to align against.
-        bin_mask: Optional binary mask for the warped image.
-        pad: Padding for the model.
-        offset: Offset for the model.
-        num_neurons: Number of neurons in the model.
-        num_layers: Number of layers in the model.
-        pool: Pooling factor for the model.
-        loss: Loss function to use ("SSIM" or "MSE").
-        save_img_dir: Directory to save aligned images (optional).
-
-    Returns:
-        Aligned image as a numpy array.
+    Returns the MIRAGE transform as a numpy array.
     """
     logger.info("Running MIRAGE alignment...")
+    logger.info(f"  pad={pad}, offset={offset}, pool={pool}, "
+                f"smoothness_radius={smoothness_radius}, "
+                f"pos_encoding_L={pos_encoding_L}, dissim_sigma={dissim_sigma}")
 
     mirage_model = mirage.MIRAGE(
         images=warped_image,
@@ -48,9 +41,13 @@ def run_mirage(
         num_neurons=num_neurons,
         num_layers=num_layers,
         pool=pool,
-        loss=loss,
+        loss_type=loss,
         batch_size=batch_size,
         LR=lr,
+        smoothness_weight=smoothness_weight,
+        smoothness_radius=smoothness_radius,
+        pos_encoding_L=pos_encoding_L,
+        dissim_sigma=dissim_sigma,
     )
 
     logger.info("Training MIRAGE model...")
@@ -61,6 +58,28 @@ def run_mirage(
     mirage_model.compute_transform()
 
     return mirage_model.get_transform()
+
+
+def _load_recommended_params(checkpoint_dir):
+    """Load recommended params from 005b if available, else return defaults."""
+    params_path = Path(checkpoint_dir) / "recommended_mirage_params.npy"
+    defaults = {
+        "offset": 15,
+        "pad": 13,
+        "smoothness_radius": 30,
+        "pos_encoding_L": 6,
+        "dissim_sigma": None,
+    }
+    if params_path.exists():
+        recommended = np.load(params_path, allow_pickle=True).item()
+        logger.info(f"Loaded recommended MIRAGE params from {params_path}")
+        for key in defaults:
+            if key in recommended:
+                defaults[key] = recommended[key]
+        logger.info(f"  Using: {defaults}")
+    else:
+        logger.warning(f"No recommended params found at {params_path}. Using defaults.")
+    return defaults
 
 def parse_arguments():
     """Parses command-line arguments using argparse."""
@@ -91,32 +110,46 @@ def parse_arguments():
         "--learning-rate",
         required=False,
         type=float,
-        default=0.001,
+        default=0.012575,
         help="Learning rate for MIRAGE training.",
+    )
+    parser.add_argument(
+        "--num-steps",
+        required=False,
+        type=int,
+        default=2048,
+        help="Number of MIRAGE training steps.",
     )
 
     return parser.parse_args()
 
 
-def main(warped_file_path, fixed_file_path, checkpoint_dir):
+def main(warped_file_path, fixed_file_path, checkpoint_dir,
+         batch_size=1024, lr=0.012575, num_steps=2048):
+    checkpoint_dir = Path(checkpoint_dir)
     warped_image = np.load(warped_file_path)
     mirage_transform_file_path = checkpoint_dir / "mirage_transform.npy"
-    if os.path.exists(mirage_transform_file_path):
-        logger.info(f"MIRAGE transform already exists at {mirage_transform_file_path}. Skipping computation.")
+    if mirage_transform_file_path.exists():
+        logger.info(f"MIRAGE transform already exists at {mirage_transform_file_path}. Skipping.")
         return 0
-        
+
+    recommended = _load_recommended_params(checkpoint_dir)
+
     mirage_transform = run_mirage(
         warped_image=warped_image,
         fixed_image=np.load(fixed_file_path),
-        pad=13,
-        offset=15,
+        pad=recommended["pad"],
+        offset=recommended["offset"],
         pool=1,
         loss="SSIM",
+        batch_size=batch_size,
+        num_steps=num_steps,
+        lr=lr,
+        smoothness_radius=recommended["smoothness_radius"],
+        pos_encoding_L=recommended["pos_encoding_L"],
+        dissim_sigma=recommended["dissim_sigma"],
     )
 
-    if mirage_transform is None:
-        logger.error("MIRAGE alignment failed.")
-        return 1
     np.save(mirage_transform_file_path, mirage_transform)
     logger.info(f"MIRAGE transform saved to {mirage_transform_file_path}")
     return 0
@@ -124,14 +157,12 @@ def main(warped_file_path, fixed_file_path, checkpoint_dir):
 
 if __name__ == "__main__":
     args = parse_arguments()
-    warped_file_path = args.warped_file_path
-    fixed_file_path = args.fixed_file_path
-    batch_size = args.batch_size
-    lr = args.learning_rate
-
-    checkpoint_dir = Path(warped_file_path).parent
+    checkpoint_dir = Path(args.warped_file_path).parent
     main(
-        warped_file_path=warped_file_path,
-        fixed_file_path=fixed_file_path,
+        warped_file_path=args.warped_file_path,
+        fixed_file_path=args.fixed_file_path,
         checkpoint_dir=checkpoint_dir,
+        batch_size=args.batch_size,
+        lr=args.learning_rate,
+        num_steps=args.num_steps,
     )
