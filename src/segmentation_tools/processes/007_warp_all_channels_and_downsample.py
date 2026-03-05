@@ -9,6 +9,7 @@ import pyvips
 from tqdm import tqdm
 from segmentation_tools.utils import normalize, get_multiotsu_threshold
 from segmentation_tools.utils.config import CHECKPOINT_DIR_NAME, RESULTS_DIR_NAME
+from segmentation_tools.utils.profiling import profile_step, profile_block, log_array
 import argparse
 
 
@@ -214,6 +215,7 @@ def combine_transforms(
     final_inverse_map = final_coords_rc.transpose((2, 0, 1))
     return final_inverse_map
 
+@profile_step("007 Warp All Channels and Downsample")
 def main(
     moving_file_path: np.ndarray,
     high_res_level: int,
@@ -221,33 +223,40 @@ def main(
     mirage_transform_file_path: Path,
     results_dir: Path,
 ):
-    output_file_path = results_dir / f"moving_complete_transform.ome.tiff"
+    output_file_path = results_dir / "moving_complete_transform.ome.tiff"
     if output_file_path.exists():
-        logger.info(f"Warped and downsampled file already exists at {output_file_path}. Skipping computation.")
+        logger.info(f"Warped and downsampled file already exists at {output_file_path}. Skipping.")
         return 0
-    
-    moving_image = tifffile.imread(
-        moving_file_path, series=0, level=high_res_level, maxworkers=4
-    )
-    moving_image = np.moveaxis(
-        np.array(moving_image), 0, -1
-    )  # Move channel axis to end
 
-    linear_transform = np.load(linear_transform_file_path)
-    mirage_warp = np.load(mirage_transform_file_path)
+    with profile_block("Load moving image"):
+        moving_image = tifffile.imread(
+            moving_file_path, series=0, level=high_res_level, maxworkers=4
+        )
+        moving_image = np.moveaxis(np.array(moving_image), 0, -1)
+    log_array("Moving image", moving_image)
 
-    combined_tranform = combine_transforms(
-        mirage_warp=mirage_warp, linear_transform=linear_transform
-    )
+    with profile_block("Load transforms"):
+        linear_transform = np.load(linear_transform_file_path)
+        mirage_warp = np.load(mirage_transform_file_path)
+    log_array("Linear transform", linear_transform)
+    log_array("MIRAGE warp", mirage_warp)
+
+    with profile_block("Combine transforms"):
+        combined_tranform = combine_transforms(
+            mirage_warp=mirage_warp, linear_transform=linear_transform
+        )
 
     n_levels = get_num_levels(moving_file_path) - high_res_level
-    _ = warp_and_save_pyramidal_tiff(
-        moving_image=moving_image,
-        combined_transform=combined_tranform,
-        n_levels=n_levels,
-        output_file_path=output_file_path,
-        description="Warped and Downsampled",
-    )
+    logger.info(f"Generating {n_levels}-level pyramid to {output_file_path}")
+
+    with profile_block("Warp and save pyramidal TIFF"):
+        warp_and_save_pyramidal_tiff(
+            moving_image=moving_image,
+            combined_transform=combined_tranform,
+            n_levels=n_levels,
+            output_file_path=output_file_path,
+            description="Warped and Downsampled",
+        )
     return 0
 
 def parse_arguments():

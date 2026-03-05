@@ -19,6 +19,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import skimage.transform
 from loguru import logger
+from segmentation_tools.utils.profiling import profile_step, profile_block, log_array
 
 import importlib
 recommend_mod = importlib.import_module(
@@ -176,18 +177,20 @@ def plot_aggregate_summary(all_stats, save_path):
 # Main
 # ---------------------------------------------------------------------------
 
+@profile_step("006b Evaluate MIRAGE Alignment")
 def main(warped_file_path, fixed_file_path, mirage_transform_path,
          checkpoint_dir, results_dir=None, crop_size=1000, n_crops=5):
     """Evaluate MIRAGE alignment quality using centroid matching on tissue crops."""
     checkpoint_dir = Path(checkpoint_dir)
     results_dir = Path(results_dir) if results_dir else checkpoint_dir
 
-    warped_image = np.load(warped_file_path)
-    fixed_image = np.load(fixed_file_path)
-    mirage_transform = np.load(mirage_transform_path)
-
-    logger.info(f"Warped shape: {warped_image.shape}, Fixed shape: {fixed_image.shape}")
-    logger.info(f"MIRAGE transform shape: {mirage_transform.shape}")
+    with profile_block("Load images and transform"):
+        warped_image = np.load(warped_file_path)
+        fixed_image = np.load(fixed_file_path)
+        mirage_transform = np.load(mirage_transform_path)
+    log_array("Warped image", warped_image)
+    log_array("Fixed image", fixed_image)
+    log_array("MIRAGE transform", mirage_transform)
 
     # Crop to common size
     min_h = min(warped_image.shape[0], fixed_image.shape[0])
@@ -196,10 +199,11 @@ def main(warped_file_path, fixed_file_path, mirage_transform_path,
     fixed_image = fixed_image[:min_h, :min_w]
 
     # Sample crops (same seed as 005b for reproducibility)
-    rng = np.random.default_rng(42)
-    fixed_crops = recommend_mod.sample_tissue_crops(
-        fixed_image, crop_size=crop_size, n_crops=n_crops, rng=rng
-    )
+    with profile_block("Sample tissue crops"):
+        rng = np.random.default_rng(42)
+        fixed_crops = recommend_mod.sample_tissue_crops(
+            fixed_image, crop_size=crop_size, n_crops=n_crops, rng=rng
+        )
 
     all_stats = []
     for i, crop_info in enumerate(fixed_crops):
@@ -207,15 +211,16 @@ def main(warped_file_path, fixed_file_path, mirage_transform_path,
         fixed_crop = crop_info["crop"]
         moving_before = warped_image[r : r + crop_size, c : c + crop_size]
 
-        # Apply MIRAGE transform to crop
-        moving_after = apply_transform_to_crop(
-            moving_before, mirage_transform, r, c, crop_size
-        )
+        with profile_block(f"Apply MIRAGE transform to crop {i}"):
+            moving_after = apply_transform_to_crop(
+                moving_before, mirage_transform, r, c, crop_size
+            )
 
-        stats = plot_before_after(
-            fixed_crop, moving_before, moving_after, crop_idx=i,
-            save_path=results_dir / f"centroid_eval_crop_{i}.png",
-        )
+        with profile_block(f"Plot before/after for crop {i}"):
+            stats = plot_before_after(
+                fixed_crop, moving_before, moving_after, crop_idx=i,
+                save_path=results_dir / f"centroid_eval_crop_{i}.png",
+            )
         all_stats.append(stats)
 
         logger.info(
@@ -223,7 +228,8 @@ def main(warped_file_path, fixed_file_path, mirage_transform_path,
             f"(delta={stats['mean_before'] - stats['mean_after']:+.1f}px)"
         )
 
-    plot_aggregate_summary(all_stats, results_dir / "centroid_eval_summary.png")
+    with profile_block("Plot aggregate summary"):
+        plot_aggregate_summary(all_stats, results_dir / "centroid_eval_summary.png")
 
     return 0
 

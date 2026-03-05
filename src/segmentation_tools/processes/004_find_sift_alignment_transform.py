@@ -1,4 +1,3 @@
-import skimage
 import cv2
 from loguru import logger
 from pathlib import Path
@@ -6,12 +5,11 @@ import numpy as np
 import tifffile
 from skimage import img_as_ubyte
 import os
-import sys
 from skimage.transform import ProjectiveTransform, AffineTransform, warp
 from skimage.metrics import structural_similarity as ssim
 from concurrent.futures import ProcessPoolExecutor
 import matplotlib.pyplot as plt
-from icecream import ic
+from segmentation_tools.utils.profiling import profile_step, profile_block, log_array
 import argparse
 
 
@@ -202,6 +200,7 @@ def get_level_transform(
     return AffineTransform(scale=(scale_x, scale_y))
 
 
+@profile_step("004 Find SIFT Alignment Transform")
 def main(
     moving_file_path,
     fixed_file_path,
@@ -219,23 +218,23 @@ def main(
     moving_level = int(level)
     fixed_level = int(level)
 
-    ic("loading")
-    moving_image = np.load(moving_file_path)
-    fixed_image = np.load(fixed_file_path)
+    with profile_block("Load images"):
+        moving_image = np.load(moving_file_path)
+        fixed_image = np.load(fixed_file_path)
+    log_array("Moving image", moving_image)
+    log_array("Fixed image", fixed_image)
 
-    ic("sift")
-    sift_transform = find_best_sift(
-        moving_image=moving_image, fixed_image=fixed_image
-    )
+    with profile_block("SIFT alignment (all variants)"):
+        sift_transform = find_best_sift(
+            moving_image=moving_image, fixed_image=fixed_image
+        )
     np.save(
         os.path.join(checkpoint_dir, "sift_transform.npy"),
         sift_transform.params,
     )
 
-    ic("linear transform")
-    ic("moving level", moving_level)
-    ic("fixed level", fixed_level)
-    ic("high res level", high_res_level)
+    logger.info(f"Computing linear transform: moving_level={moving_level}, "
+                f"fixed_level={fixed_level}, high_res_level={high_res_level}")
     linear_transform = (
         get_level_transform(
             original_moving_file_path,
@@ -249,7 +248,6 @@ def main(
             level_from=fixed_level,
         ).params
     )
-    ic("saving linear transform")
     linear_output_path = checkpoint_dir / "linear_transform.npy"
     np.save(
         linear_output_path,

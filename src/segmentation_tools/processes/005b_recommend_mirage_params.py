@@ -30,6 +30,7 @@ from loguru import logger
 from scipy.spatial import cKDTree
 from scipy.stats import median_abs_deviation
 from skimage.measure import label, regionprops
+from segmentation_tools.utils.profiling import profile_step, profile_block, log_array
 
 
 # ---------------------------------------------------------------------------
@@ -377,17 +378,18 @@ def plot_summary(agg_params, crop_results, save_path):
 # Main
 # ---------------------------------------------------------------------------
 
+@profile_step("005b Recommend MIRAGE Parameters")
 def main(warped_file_path, fixed_file_path, checkpoint_dir, results_dir=None,
          crop_size=1000, n_crops=5):
     """Sample crops, recommend MIRAGE params, save results and plots."""
     checkpoint_dir = Path(checkpoint_dir)
     results_dir = Path(results_dir) if results_dir else checkpoint_dir
 
-    warped_image = np.load(warped_file_path)
-    fixed_image = np.load(fixed_file_path)
-
-    logger.info(f"Warped image shape: {warped_image.shape}")
-    logger.info(f"Fixed image shape:  {fixed_image.shape}")
+    with profile_block("Load images"):
+        warped_image = np.load(warped_file_path)
+        fixed_image = np.load(fixed_file_path)
+    log_array("Warped image", warped_image)
+    log_array("Fixed image", fixed_image)
 
     # Use the smaller of the two shapes for crop bounds
     min_h = min(warped_image.shape[0], fixed_image.shape[0])
@@ -396,9 +398,10 @@ def main(warped_file_path, fixed_file_path, checkpoint_dir, results_dir=None,
     fixed_image = fixed_image[:min_h, :min_w]
 
     # Sample crops from fixed image (tissue presence check)
-    rng = np.random.default_rng(42)
-    fixed_crops = sample_tissue_crops(fixed_image, crop_size=crop_size,
-                                      n_crops=n_crops, rng=rng)
+    with profile_block("Sample tissue crops"):
+        rng = np.random.default_rng(42)
+        fixed_crops = sample_tissue_crops(fixed_image, crop_size=crop_size,
+                                          n_crops=n_crops, rng=rng)
 
     crop_results = []
     for i, crop_info in enumerate(fixed_crops):
@@ -408,7 +411,8 @@ def main(warped_file_path, fixed_file_path, checkpoint_dir, results_dir=None,
 
         logger.info(f"Crop {i}: row={r}, col={c}, size={fixed_crop.shape}")
 
-        params = recommend_mirage_params(fixed_crop, moving_crop)
+        with profile_block(f"Recommend params for crop {i}"):
+            params = recommend_mirage_params(fixed_crop, moving_crop)
         crop_results.append(params)
 
         logger.info(
@@ -418,13 +422,15 @@ def main(warped_file_path, fixed_file_path, checkpoint_dir, results_dir=None,
         )
 
         # Quiver plot per crop
-        plot_quiver(
-            fixed_crop, moving_crop, params, crop_idx=i,
-            save_path=results_dir / f"centroid_quiver_crop_{i}.png",
-        )
+        with profile_block(f"Plot quiver for crop {i}"):
+            plot_quiver(
+                fixed_crop, moving_crop, params, crop_idx=i,
+                save_path=results_dir / f"centroid_quiver_crop_{i}.png",
+            )
 
     # Aggregate
-    agg = aggregate_recommendations(crop_results)
+    with profile_block("Aggregate recommendations"):
+        agg = aggregate_recommendations(crop_results)
     logger.info(f"Aggregated recommendation: {agg}")
 
     # Save
@@ -432,7 +438,8 @@ def main(warped_file_path, fixed_file_path, checkpoint_dir, results_dir=None,
     np.save(out_path, agg, allow_pickle=True)
     logger.info(f"Saved recommended params to {out_path}")
 
-    plot_summary(agg, crop_results, results_dir / "mirage_param_recommendation.png")
+    with profile_block("Plot summary"):
+        plot_summary(agg, crop_results, results_dir / "mirage_param_recommendation.png")
 
     return 0
 

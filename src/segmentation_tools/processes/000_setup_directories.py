@@ -1,10 +1,8 @@
-from icecream import ic
 from pathlib import Path
 from loguru import logger
 from segmentation_tools.utils.config import CHECKPOINT_DIR_NAME, RESULTS_DIR_NAME
-import os
+from segmentation_tools.utils.profiling import profile_step
 import shutil
-import sys
 import argparse
 
 
@@ -31,12 +29,13 @@ def parse_arguments():
     return parser.parse_args()
 
 
+@profile_step("000 Setup Directories")
 def main(output_dir_root: Path, job_title: str):
     """Set up output directories."""
     output_dir_root.mkdir(parents=True, exist_ok=True)
     output_dir = output_dir_root / job_title
 
-    if os.path.exists(output_dir):
+    if output_dir.exists():
         shutil.rmtree(output_dir)
 
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -1,12 +1,12 @@
 import subprocess
 import tempfile
-import sys
 import shutil
 from pathlib import Path
 from typing import Union
 from loguru import logger
 import tifffile
 from segmentation_tools.utils.config import CHECKPOINT_DIR_NAME
+from segmentation_tools.utils.profiling import profile_step, profile_block
 import argparse
 
 
@@ -111,11 +111,12 @@ def parse_arguments():
     return parser.parse_args()
 
 
+@profile_step("001 Convert to TIFF")
 def main(input_file_path, output_root, prefix):
-    # 3. Construct the output path
     output_file_name = Path(output_root) / Path(CHECKPOINT_DIR_NAME) / Path(f"{prefix}.tiff")
-    
-    # 4. Execute the conversion
+    logger.info(f"Input: {input_file_path}")
+    logger.info(f"Output: {output_file_name}")
+
     convert_file_to_tiff(
         input_file_path=Path(input_file_path),
         output_file_path=output_file_name,

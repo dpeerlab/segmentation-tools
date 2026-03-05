@@ -7,6 +7,7 @@ import skimage
 import shapely
 import cv2
 from loguru import logger
+from segmentation_tools.utils.profiling import profile_step, profile_block, log_array
 
 def masks_to_contours(masks: ArrayLike) -> np.ndarray:
     """
@@ -104,10 +105,20 @@ def parse_arguments():
 
     return parser.parse_args()
 
+@profile_step("011 Convert Masks to GeoDataFrame")
 def main(masks_file_path, results_dir: str):
-    masks = np.load(masks_file_path)
-    contours = masks_to_contours(masks)
-    gdf = contours_to_polygons(contours[:, 0], contours[:, 1], contours[:, 2])
+    with profile_block("Load masks"):
+        masks = np.load(masks_file_path)
+    log_array("Masks", masks)
+    logger.info(f"Unique labels: {masks.max()}")
+
+    with profile_block("Extract contours"):
+        contours = masks_to_contours(masks)
+    logger.info(f"Contour points: {len(contours)}")
+
+    with profile_block("Convert to polygons"):
+        gdf = contours_to_polygons(contours[:, 0], contours[:, 1], contours[:, 2])
+    logger.info(f"Polygons created: {len(gdf)}")
 
     if args.prefix:
         output_file_path = Path(results_dir) / f"{args.prefix}_segmentation_masks.parquet"

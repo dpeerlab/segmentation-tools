@@ -3,6 +3,7 @@ import cv2
 from pathlib import Path
 from typing import Union
 from loguru import logger
+from segmentation_tools.utils.profiling import profile_step, profile_block
 import argparse
 
 
@@ -39,9 +40,10 @@ def find_optimal_sift_level_by_keypoints(
     sift = cv2.SIFT_create()
     best_level = 0
 
+    logger.info(f"Searching levels {max_possible_level} -> {min_level_search} for {k_min} <= K <= {k_max}")
+
     # Iterate from a coarse level (highest index) down to Level 0
     for i in range(max_possible_level, min_level_search - 1, -1):
-        print(i)
         # Load the image data for this level
         # Note: tifffile.TiffPage.asarray() loads the image into memory (NumPy)
         img_m_page = tif_m.series[0].levels[i]
@@ -130,6 +132,7 @@ def parse_arguments():
     return parser.parse_args()
 
 
+@profile_step("002 Find Optimal SIFT Levels")
 def main(moving_fp, fixed_fp, k_min, k_max, max_level_search, min_level_search, checkpoint_dir):
     best_level = find_optimal_sift_level_by_keypoints(
         moving_fp, fixed_fp, k_min, k_max, max_level_search, min_level_search

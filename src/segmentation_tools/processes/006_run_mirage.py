@@ -2,6 +2,7 @@ from loguru import logger
 import numpy as np
 from pathlib import Path
 import mirage
+from segmentation_tools.utils.profiling import profile_step, profile_block, log_array
 import argparse
 
 
@@ -124,10 +125,15 @@ def parse_arguments():
     return parser.parse_args()
 
 
+@profile_step("006 Run MIRAGE")
 def main(warped_file_path, fixed_file_path, checkpoint_dir,
          batch_size=1024, lr=0.012575, num_steps=2048):
     checkpoint_dir = Path(checkpoint_dir)
-    warped_image = np.load(warped_file_path)
+
+    with profile_block("Load warped image"):
+        warped_image = np.load(warped_file_path)
+    log_array("Warped image", warped_image)
+
     mirage_transform_file_path = checkpoint_dir / "mirage_transform.npy"
     if mirage_transform_file_path.exists():
         logger.info(f"MIRAGE transform already exists at {mirage_transform_file_path}. Skipping.")
@@ -135,9 +141,16 @@ def main(warped_file_path, fixed_file_path, checkpoint_dir,
 
     recommended = _load_recommended_params(checkpoint_dir)
 
-    mirage_transform = run_mirage(
-        warped_image=warped_image,
-        fixed_image=np.load(fixed_file_path),
+    with profile_block("Load fixed image"):
+        fixed_image = np.load(fixed_file_path)
+    log_array("Fixed image", fixed_image)
+
+    logger.info(f"Training params: batch_size={batch_size}, lr={lr}, num_steps={num_steps}")
+
+    with profile_block("MIRAGE training"):
+        mirage_transform = run_mirage(
+            warped_image=warped_image,
+            fixed_image=fixed_image,
         pad=recommended["pad"],
         offset=recommended["offset"],
         pool=1,
@@ -147,8 +160,9 @@ def main(warped_file_path, fixed_file_path, checkpoint_dir,
         lr=lr,
         smoothness_radius=recommended["smoothness_radius"],
         pos_encoding_L=recommended["pos_encoding_L"],
-        dissim_sigma=recommended["dissim_sigma"],
-    )
+            dissim_sigma=recommended["dissim_sigma"],
+        )
+    log_array("MIRAGE transform", mirage_transform)
 
     np.save(mirage_transform_file_path, mirage_transform)
     logger.info(f"MIRAGE transform saved to {mirage_transform_file_path}")

@@ -1,9 +1,9 @@
-import sys
 from loguru import logger
 import numpy as np
 from pathlib import Path
 import skimage
 import tifffile
+from segmentation_tools.utils.profiling import profile_step, profile_block, log_array
 import argparse
 
 
@@ -32,17 +32,25 @@ def get_shape_at_level(
     return shape
 
 
+@profile_step("005 Warp Image with SIFT")
 def main(moving_file_path, transform_file_path, checkpoint_dir, fixed_shape):
-    moving_image = np.load(moving_file_path)
-    transform_params = np.load(transform_file_path)
-    image_warped = skimage.transform.warp(
-        moving_image.astype("float32"),
-        transform_params,
-        order=0,
-        output_shape=fixed_shape,
-        mode="constant",
-    )
-    warped_file_path = checkpoint_dir / f"moving_dapi_linear_warped.npy"
+    with profile_block("Load moving image and transform"):
+        moving_image = np.load(moving_file_path)
+        transform_params = np.load(transform_file_path)
+    log_array("Moving image", moving_image)
+    logger.info(f"Target shape: {fixed_shape}")
+
+    with profile_block("Warp image"):
+        image_warped = skimage.transform.warp(
+            moving_image.astype("float32"),
+            transform_params,
+            order=0,
+            output_shape=fixed_shape,
+            mode="constant",
+        )
+    log_array("Warped image", image_warped)
+
+    warped_file_path = checkpoint_dir / "moving_dapi_linear_warped.npy"
     np.save(warped_file_path, image_warped)
     logger.info(f"Warped image saved to {warped_file_path}")
     return 0

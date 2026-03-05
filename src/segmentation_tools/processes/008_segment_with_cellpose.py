@@ -1,29 +1,29 @@
-import scipy
 import numpy as np
-from cellpose import models, core, io, plot
-import matplotlib.pyplot as plt
+from cellpose import models, core, io
 from loguru import logger
 import sys
 from pathlib import Path
 import os
 import tifffile
+from segmentation_tools.utils.profiling import profile_step, profile_block, log_array
 import argparse
 
+
+@profile_step("008 Segment with CellPose")
 def main(warped_moving_file_path: os.PathLike, result_dir: os.PathLike, dapi_channel: int, membrane_channel: int = None):
-    """
-    Segments the warped moving image using Cellpose and saves the segmentation masks.
-    """
+    """Segments the warped moving image using Cellpose and saves the segmentation masks."""
     io.logger_setup()
-    logger.info("CellPose logger set up")
 
-    if core.use_gpu()==False:
+    if not core.use_gpu():
         raise ImportError("No GPU access, change your runtime")
+    logger.info("GPU available for CellPose")
 
-    model = models.CellposeModel(gpu=True)
+    with profile_block("Load CellPose model"):
+        model = models.CellposeModel(gpu=True)
 
-    # Load the warped moving image
-    warped_moving_image = tifffile.imread(warped_moving_file_path, series=0, level=1)
-    logger.info(f"Warped moving image shape: {warped_moving_image.shape}")
+    with profile_block("Load warped moving image"):
+        warped_moving_image = tifffile.imread(warped_moving_file_path, series=0, level=1)
+    log_array("Warped moving image", warped_moving_image)
 
     # Select channels for segmentation (e.g., DAPI and membrane)
     if dapi_channel is not None:
@@ -56,17 +56,18 @@ def main(warped_moving_file_path: os.PathLike, result_dir: os.PathLike, dapi_cha
     cellprob_threshold = 0.0
     tile_norm_blocksize = 0
 
-    logger.info("Starting CellPose")
-    masks, flows, _ = model.eval(
-        img_selected_channels, 
-        augment = True,
-        batch_size=2,
-        flow_threshold=flow_threshold, 
-        cellprob_threshold=cellprob_threshold,
-        normalize={"tile_norm_blocksize": tile_norm_blocksize},
-        progress=True
-    )
-    logger.info(f"CellPose Finished")
+    with profile_block("CellPose segmentation"):
+        masks, flows, _ = model.eval(
+            img_selected_channels,
+            augment=True,
+            batch_size=2,
+            flow_threshold=flow_threshold,
+            cellprob_threshold=cellprob_threshold,
+            normalize={"tile_norm_blocksize": tile_norm_blocksize},
+            progress=True
+        )
+    logger.info(f"CellPose finished: {masks.max()} cells detected")
+    log_array("Masks", masks)
 
     cell_prob_logit = flows[2]
     cell_prob = cell_prob_logit

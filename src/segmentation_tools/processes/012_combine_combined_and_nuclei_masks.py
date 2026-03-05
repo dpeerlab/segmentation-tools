@@ -1,9 +1,9 @@
 import geopandas as gpd
 import pandas as pd
-import matplotlib.pyplot as plt
 import argparse
 from loguru import logger
 from pathlib import Path
+from segmentation_tools.utils.profiling import profile_step, profile_block
 
 
 def join_masks(combined_masks: gpd.GeoDataFrame, nuclei_masks: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -44,33 +44,32 @@ def parse_arguments():
 
     return parser.parse_args()
 
+@profile_step("012 Combine Combined and Nuclei Masks")
 def main():
     args = parse_arguments()
 
     combined_masks_path = args.combined_masks
     nuclei_masks_path = args.nuclei_masks
 
-
     final_gdf_path = Path(combined_masks_path).parent / "final_combined_nuclei_masks.parquet"
     if final_gdf_path.exists():
-        logger.info(f"Final combined nuclei masks already exist at {final_gdf_path}. Skipping save.")
+        logger.info(f"Final combined nuclei masks already exist at {final_gdf_path}. Skipping.")
         return 0
 
-    combined_gdf = gpd.read_parquet(combined_masks_path)
-    logger.info(f"Loaded combined masks from {combined_masks_path}.")
+    with profile_block("Load combined masks"):
+        combined_gdf = gpd.read_parquet(combined_masks_path)
+    logger.info(f"Combined masks: {len(combined_gdf)} polygons from {combined_masks_path}")
 
-    nuclei_gdf = gpd.read_parquet(nuclei_masks_path)
-    logger.info(f"Loaded nuclei masks from {nuclei_masks_path}.")
+    with profile_block("Load nuclei masks"):
+        nuclei_gdf = gpd.read_parquet(nuclei_masks_path)
+    logger.info(f"Nuclei masks: {len(nuclei_gdf)} polygons from {nuclei_masks_path}")
 
-    final_gdf = join_masks(combined_gdf, nuclei_gdf)
-    logger.info("Joined combined and nuclei masks.")
+    with profile_block("Spatial join"):
+        final_gdf = join_masks(combined_gdf, nuclei_gdf)
+    logger.info(f"Final merged mask: {len(final_gdf)} polygons")
 
-    
-    final_gdf.to_parquet(
-        final_gdf_path,
-        index=False
-    )
-    logger.info(f"Saved final combined nuclei masks to {final_gdf_path}.")
+    final_gdf.to_parquet(final_gdf_path, index=False)
+    logger.info(f"Saved to {final_gdf_path}")
 
 if __name__ == "__main__":
     main()
