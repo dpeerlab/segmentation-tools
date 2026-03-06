@@ -41,49 +41,15 @@ python \
 
 # echo "Moving image converted to TIFF."
 
-# Step 3: Find optimal levels
+# Step 4 - VALIS alignment (replaces steps 002, 003@SIFT, 004)
 python \
-    /data1/peerd/ghoshr/segmentation_tools/src/segmentation_tools/processes/002_find_optimal_sift_levels.py \
-    --moving-file ${CHECKPOINTS_DIR}/moving.tiff \
-    --fixed-file ${CHECKPOINTS_DIR}/fixed.tiff \
-    --k-min 10000 \
-    --k-max 500000
+    /data1/peerd/ghoshr/segmentation_tools/src/segmentation_tools/processes/004_valis_alignment.py \
+    --fixed-file-path ${CHECKPOINTS_DIR}/fixed.tiff \
+    --moving-file-path ${CHECKPOINTS_DIR}/moving.tiff \
+    --fixed-dapi-channel ${FIXED_DAPI_CHANNEL} \
+    --moving-dapi-channel ${MOVING_DAPI_CHANNEL}
 
-# echo "Optimal SIFT levels determined."
-
-SIFT_LEVEL_FILE_PATH=${CHECKPOINTS_DIR}/optimal_sift_level.txt
-OPTIMAL_SIFT_LEVEL=$(cat ${SIFT_LEVEL_FILE_PATH})
-# echo "Using optimal SIFT level: ${OPTIMAL_SIFT_LEVEL}"
-
-# Step 3 - Preprocess images
-python \
-    /data1/peerd/ghoshr/segmentation_tools/src/segmentation_tools/processes/003_preprocess_images.py \
-    --input-file-path ${CHECKPOINTS_DIR}/fixed.tiff \
-    --dapi-channel-moving ${FIXED_DAPI_CHANNEL} \
-    --level ${OPTIMAL_SIFT_LEVEL} \
-    --output-file-path ${CHECKPOINTS_DIR}/ds_fixed_dapi_filtered_level_${OPTIMAL_SIFT_LEVEL}.npy \
-
-# echo "Fixed image preprocessed."
-
-python \
-    /data1/peerd/ghoshr/segmentation_tools/src/segmentation_tools/processes/003_preprocess_images.py \
-    --input-file-path ${CHECKPOINTS_DIR}/moving.tiff \
-    --dapi-channel-moving ${MOVING_DAPI_CHANNEL} \
-    --level ${OPTIMAL_SIFT_LEVEL} \
-    --output-file-path ${CHECKPOINTS_DIR}/ds_moving_dapi_filtered_level_${OPTIMAL_SIFT_LEVEL}.npy \
-
-# echo "Moving image preprocessed."
-
-# Step 4 - Find SIFT alignment transform
-python \
-    /data1/peerd/ghoshr/segmentation_tools/src/segmentation_tools/processes/004_find_sift_alignment_transform.py \
-    --moving-file-path ${CHECKPOINTS_DIR}/ds_moving_dapi_filtered_level_*.npy \
-    --fixed-file-path ${CHECKPOINTS_DIR}/ds_fixed_dapi_filtered_level_*.npy \
-    --high-res-level ${HIGH_RES_LEVEL} \
-    --original-moving-file-path ${CHECKPOINTS_DIR}/moving.tiff \
-    --original-fixed-file-path ${CHECKPOINTS_DIR}/fixed.tiff
-
-# echo "SIFT alignment transform computed."
+echo "VALIS alignment completed."
 
 # Step 4.5 - Preprocess high-res images
 python \

@@ -1,3 +1,5 @@
+# DEPRECATED: Replaced by 004_valis_alignment.py on the feature/valis-alignment branch.
+# Kept for reference and compatibility with the main branch SIFT pipeline.
 import cv2
 from loguru import logger
 from pathlib import Path

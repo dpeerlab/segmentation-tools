@@ -23,6 +23,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+valis = [
+  "valis-wsi"
+]
 dev = [
   "pytest",
   "coverage",
