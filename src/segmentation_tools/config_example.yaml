@@ -1,0 +1,36 @@
+# segmentation-tools sample config
+# Copy and edit this file for each experiment, then run:
+#   segmentation-tools submit --config my_sample.yaml
+# or:
+#   segmentation-tools run --config my_sample.yaml
+
+# --- Required ---
+job_title: "0033151_Region_1"
+fixed_file: "/data1/peerd/roses3/basal_ablation/data/raw/xenium/output-XETG00174__0033151__Region_1__20250425__201151/morphology_focus/morphology_focus_0000.ome.tif"
+moving_file: "/data1/peerd/roses3/basal_ablation/data/raw/if/nd2_files/20250430_NP_TT_XeniumRun_4_NakCD45AF555/0033151/Region_1.nd2"
+output_root: "/data1/peerd/ghoshr/sam_alignment"
+
+# --- Channel indices ---
+fixed_dapi_channel: 0    # DAPI channel in the fixed (Xenium) image
+moving_dapi_channel: 1   # DAPI channel in the moving (IF) image
+
+# --- CellPose segmentation channels ---
+cellpose_dapi_channel: 1
+cellpose_membrane_channel: 0
+
+# --- MIRAGE hyperparameters (leave commented to use auto-recommendation from step 5b) ---
+# mirage_batch_size: 1024
+# mirage_learning_rate: 0.012575
+# mirage_num_steps: 2048
+
+# --- Resume ---
+start_step: 0   # Set > 0 to resume from a specific step
+
+# --- SLURM (only used by `submit` command) ---
+slurm:
+  conda_env: "contamination"
+  partition: "peerd"
+  time: "23:00:00"
+  mem: "500G"
+  gpus: 1
+  cpus: 2

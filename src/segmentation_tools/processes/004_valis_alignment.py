@@ -12,6 +12,7 @@ MIRAGE (step 006) handles that.
 from pathlib import Path
 import argparse
 import shutil
+import warnings
 
 import numpy as np
 import tifffile
@@ -131,10 +132,24 @@ def main(fixed_file_path, moving_file_path, fixed_dapi_channel,
             align_to_reference=True,
             non_rigid_registrar_cls=None,  # Skip non-rigid; MIRAGE handles this
             image_type="fluorescence",
+            check_for_reflections=True,  # Tests all 4 flip variants, picks best by keypoint matches
         )
-        rigid_registrar, non_rigid_registrar, error_df = registrar.register()
+        # Suppress VALIS's FutureWarnings from deprecated scikit-image API calls.
+        # Also catch AttributeError from VALIS's cleanup() when non_rigid_registrar_cls=None
+        # — registration itself completes successfully before cleanup runs.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning, module="valis")
+            warnings.filterwarnings("ignore", category=UserWarning, module="valis")
+            try:
+                _, _, error_df = registrar.register()
+            except AttributeError as e:
+                if "non_rigid_reg_kwargs" in str(e):
+                    logger.warning(f"VALIS cleanup error (non-fatal, registration completed): {e}")
+                    error_df = None
+                else:
+                    raise
 
-    logger.info(f"VALIS registration complete")
+    logger.info("VALIS registration complete")
     if error_df is not None:
         logger.info(f"Registration error summary:\n{error_df.to_string()}")
 
@@ -142,7 +157,6 @@ def main(fixed_file_path, moving_file_path, fixed_dapi_channel,
     # VALIS keys slide_dict by filename stem (without extension)
     moving_slide = registrar.slide_dict.get("01_moving_dapi")
     if moving_slide is None:
-        # Fallback: try with extension
         for key, slide in registrar.slide_dict.items():
             if "moving" in key.lower():
                 moving_slide = slide
@@ -154,8 +168,14 @@ def main(fixed_file_path, moving_file_path, fixed_dapi_channel,
             f"Available keys: {list(registrar.slide_dict.keys())}"
         )
 
-    # VALIS M is a forward transform (moving -> fixed) at processed resolution
+    # VALIS M is a forward transform (moving -> fixed) at processed resolution.
+    # If registration failed entirely, M will be None — raise clearly.
     forward_M = moving_slide.M
+    if forward_M is None:
+        raise RuntimeError(
+            "VALIS registration failed: slide.M is None. "
+            "Check that the DAPI channels are correct and the images have sufficient overlap."
+        )
     logger.info(f"VALIS forward transform (processed res):\n{forward_M}")
 
     processed_shape_rc = moving_slide.processed_img_shape_rc
@@ -180,8 +200,6 @@ def main(fixed_file_path, moving_file_path, fixed_dapi_channel,
     logger.info(f"Linear transform saved to {output_path}")
 
     # --- 5. Cleanup ---
-    registrar.close()
-
     # Optionally clean up valis working directories (keep input for debugging)
     # shutil.rmtree(valis_output_dir, ignore_errors=True)
 

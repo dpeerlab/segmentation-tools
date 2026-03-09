@@ -49,7 +49,7 @@ def profile_block(name):
     """
     mem_before = _get_memory_mb()
     t0 = time.perf_counter()
-    logger.info(f"[START] {name} | mem={_format_size_mb(mem_before)}")
+    logger.info(f"[START] {name} | mem={_format_size_mb(mem_before)} | t=0.0s")
     try:
         yield
     finally:

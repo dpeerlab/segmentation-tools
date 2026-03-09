@@ -110,6 +110,8 @@ ENV/
 # data files
 data/
 
+# logs
+logs/
 
 # Claude
 CLAUDE.md

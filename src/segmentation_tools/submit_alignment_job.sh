@@ -6,7 +6,10 @@ MOVING_FILE="/data1/peerd/roses3/basal_ablation/data/raw/if/nd2_files/20250430_N
 OUTPUT_ROOT="/data1/peerd/ghoshr/sam_alignment"
 
 
+START_STEP=${1:-0}   # Optional arg: step number to resume from (e.g. bash submit_alignment_job.sh 4)
+
 CONDA_ENV="contamination"
+CONDA_ENV_PATH="/usersoftware/peerd/ghoshr/.conda/envs/${CONDA_ENV}"
 PIPELINE_SCRIPT="/data1/peerd/ghoshr/segmentation_tools/src/segmentation_tools/pipeline.sh"
 # PIPELINE_SCRIPT="/data1/peerd/ghoshr/cellpose_only.sh"
 sbatch \
@@ -18,4 +21,4 @@ sbatch \
     --mem=500G \
     --gres=gpu:1 \
     --cpus-per-task=2 \
-    --wrap="source ~/.bashrc && conda activate $CONDA_ENV && export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH &&  ${PIPELINE_SCRIPT} ${JOB_TITLE} ${FIXED_FILE} ${MOVING_FILE} ${OUTPUT_ROOT}"
+    --wrap="export PATH=${CONDA_ENV_PATH}/bin:\$PATH && export LD_LIBRARY_PATH=${CONDA_ENV_PATH}/lib:\$LD_LIBRARY_PATH && ${PIPELINE_SCRIPT} ${JOB_TITLE} ${FIXED_FILE} ${MOVING_FILE} ${OUTPUT_ROOT} ${START_STEP}"

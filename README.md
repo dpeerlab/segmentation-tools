@@ -1,71 +1,276 @@
 # segmentation-tools
 
-Example output:
-/data1/peerd/moormana/data/segger/xenium_andrew_cornish/andrew_c_alignment
+A CLI pipeline for aligning and segmenting multiplexed microscopy images. Registers a moving image (e.g., IF/immunofluorescence) to a fixed reference (e.g., Xenium spatial transcriptomics) using VALIS for global affine alignment followed by MIRAGE for local non-linear correction, then segments cells with CellPose.
 
-Inputs:
-- Output root: this is where the intermediate and result files will go (andrew_c_alignment)
-- Job Title - name of the subdir within the output root. (output-XETG00174__0064842__Region_1__20250514__154857)
-- Moving file - this is file containing the image the will be aligned (can be .tiff, .nd2, .mrxs...) -> bioformats2raw library should take in most microscopy formats and raw2ometiff will convert the output from the first package to an OME TIFF file
-- Fixed file - this if the file containg the image that the moving file will be aligned too (for now we've only done xenium so it should be morpholoogy_focus subdir)
-- HIGH_RES_LEVEL - highest resolution image to work with (can usually be 0)
-- FIXED_DAPI_CHANNEL - 0
-- MOVING_DAPI_CHANNEL - channel that contains the DAPI image
+---
 
-1. Step 0 - set up directories:
-	Args: --output-root, --job-title
-	- Create Directory at OUTPUT_ROOT
-	- Create a subidirectory at OUTPUT_ROOT/JOB_TITLE
-- At the end should have a dir and a subdir
-  
-1. Step 1 - convert moving and fixed files to an OME TIFF for fixed and moving separately:
-	Args: --input-path, --output-root (change name to avoid confusion) OUTPUT_ROOT/JOB_TITLE, --prefix (prepended to the output path of the converted file e.g. fixed, right now is just the name of the resulting file)
-	- Calls the bioformats2raw library which takes in different microscopy formats and converts a zarr file, raw2ometiff takes that zarr file and converts to a tiff file
-- At the ened should have a moving.tiff and a fixed.tiff in the OUPTUT_ROOT/JOB_TITLE
-  
-1. Step 2 - Find optimal levels for SIFT
-	- Args: --moving-file (should be under ${OUTPUT_ROOT}/${JOB_TITLE}/.checkpoints/moving.tiff), --fixed-file, --k-min (minimum keypoints), --k-max (maximum keypoints)
-	Checks the number of keypoints that are found by SIFT and takes in a min and a mask. Loops through all the levels and finds the coarsest one that is between the bounds
-At the end should have a new file called `optimal_sift_levels.txt` in the .checkpoints folder
+## Table of Contents
 
-1. Step 3 - Preprocess images
-	Separate for fixed and moving
-   - Args: --input-file-path (path to either fixed of moving file - should be in .checkpoints folder), --dapi-channel-moving (should be specified at the beginning of the pipeline), --level (read in from the `optimal_sift_levels.txt` file), --output-file-path (path to the checkpoints dir, right now si set to SUB_DIR/ds_fixed_dapi_filtered_level_{SIFT_LEVEL}.npy
-	Performs normalization
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Usage](#usage)
+  - [Config file (recommended)](#config-file-recommended)
+  - [CLI flags](#cli-flags)
+  - [Submitting to SLURM](#submitting-to-slurm)
+  - [Resuming a run](#resuming-a-run)
+  - [Viewing results](#viewing-results)
+- [Pipeline Steps](#pipeline-steps)
+- [Output Structure](#output-structure)
+- [Requirements](#requirements)
 
-2. Step 4 - Find SIFT homography matrix
-	Inputs: --moving-file-path (path to the downsampled moving file (should be specified in the call to the process above)), --fixed-file-path (same as moving), --high-res-level (the high res level specified at the beginning of the pipeline), --original-moving-file-path (path to the tiff file we got from step 1), --original-fixed-file-path (path to the tiff file we got from step 1)
-	Saves the homography matrix to .checkpoints/linear_transform.npy
+---
 
-3. Step 4.5 Preprocess the high res images
-	Same as step 3, but we pass in an extra argument (--filter), this also runs the adaptive Otsu threshold filtering
+## Installation
 
-4. Step 5: Warp the high res image
-   Inputs: --moving-file-path: Path to the high res movig filtered file, --transform-file-path: reads in the transfrom file path that was outputted by step 4
-   - Warps the image and outputs to a file "moving_dapi_linear_warped.npy"
-   - Could possibly run using the cucim library (GPU), would have to check speed improvement and memory usage to determine if it's worth
+```bash
+# Clone and install in editable mode
+pip install -e .
 
-5. Step 6: MIRAGE
-	Inputs: --warped-file-path: path to the warped file from the previous process, --fixed-file-path: path to the high res fixed filtered file from step 4.5, --batch-size (use the recommended 1024), --learning-rate (use the recommended 0.012575)
-	Runs mirage and outputs the transform to checkpoints/mirage_transform.npy
+# With development dependencies
+pip install -e ".[dev]"
 
-6. Step 7: Apply warp to channels
-	Inputs: --moving-file-path: file path for the moving.tiff file from step 1, --high-res-level (get this from start of the pipeline), if it's lower for any reason it will only warp channels at that level and below
-	Normalize each of the channels and applies the combined mirage, linear sift transform. Downsamples from the top of the pyramid so that we have all resolution levels
-	Outputs to results folder: results/moving_complete_transform.ome.tiff
+# With VALIS alignment support (required for this branch)
+pip install -e ".[valis]"
+```
 
-Optional step:
-	Calculate SSIM before and after MIRAGE and output SSIM plots
-	-- outputs to checkpoints dir
+> **Note:** MIRAGE (in `src/MIRAGE/`) is a separate package using Poetry. It requires TensorFlow and a GPU.
+> ```bash
+> cd src/MIRAGE && poetry install
+> ```
 
+---
 
-8. Step 8: Segment with CellPose
-   - Inputs: --warped-moving-file-path (this is the tiff file outputted from the last step), --dapi-channel (should be the same as the one from the beginning), --membrane-channel (should actually also be specified by the user, right now it's hardcoded and it shouldn't be)
-   - Runs CellPose with (membrane + DAPI), DAPI alone, and membrane alone (eventually will combine the three in a smart way to ge the best segmentation)
-   - outputs a masks npy image, and the cell probabilities
+## Quick Start
 
-9. Step 9: Convert masks to GeoDataFrame
-    - Does what it says figure it out Matt I'm tired
-    - outputs to a parquet file (should probably indicate that it's a geo parquet)
+**1. Generate a config file:**
+```bash
+segmentation-tools init-config > my_sample.yaml
+```
 
+**2. Edit `my_sample.yaml`** with your file paths and channel indices:
+```yaml
+job_title: "sample_001"
+fixed_file: "/path/to/xenium/morphology_focus_0000.ome.tif"
+moving_file: "/path/to/if/Region_1.nd2"
+output_root: "/path/to/output"
+fixed_dapi_channel: 0
+moving_dapi_channel: 1
+```
 
+**3. Submit to SLURM:**
+```bash
+segmentation-tools submit --config my_sample.yaml
+```
+
+**4. View QC report when done:**
+```bash
+segmentation-tools view -o /path/to/output -j sample_001
+```
+
+---
+
+## Usage
+
+### Config file (recommended)
+
+Generate a sample config and edit it:
+```bash
+segmentation-tools init-config > my_sample.yaml
+segmentation-tools submit --config my_sample.yaml
+```
+
+The config covers all inputs, channel indices, MIRAGE hyperparameters, and SLURM settings. See [config_example.yaml](src/segmentation_tools/config_example.yaml) for the full reference.
+
+### CLI flags
+
+All config values can be specified directly as CLI flags (these override config file values):
+
+```bash
+segmentation-tools run \
+  -f /path/to/fixed.ome.tif \
+  -m /path/to/moving.nd2 \
+  -o /path/to/output \
+  -j my_sample \
+  --fixed-dapi-channel 0 \
+  --moving-dapi-channel 1
+```
+
+### Submitting to SLURM
+
+```bash
+# From config file
+segmentation-tools submit --config my_sample.yaml
+
+# With SLURM overrides
+segmentation-tools submit --config my_sample.yaml \
+  --partition gpu --mem 200G --cpus 8 --time 12:00:00
+
+# Dry run — print the sbatch command without submitting
+segmentation-tools submit --config my_sample.yaml --dry-run
+```
+
+Default SLURM settings (overridable via config or flags):
+| Setting | Default |
+|---------|---------|
+| `conda_env` | `contamination` |
+| `partition` | `peerd` |
+| `time` | `23:00:00` |
+| `mem` | `500G` |
+| `gpus` | `1` |
+| `cpus` | `2` |
+
+### Running locally
+
+```bash
+conda activate contamination
+segmentation-tools run --config my_sample.yaml
+```
+
+### Resuming a run
+
+Each step has a number. Pass `--start-step N` to skip all steps before N:
+
+```bash
+# Re-run from VALIS alignment onward (skips TIFF conversion)
+segmentation-tools submit --config my_sample.yaml --start-step 4
+
+# Re-run from MIRAGE onward (skips alignment entirely)
+segmentation-tools submit --config my_sample.yaml --start-step 6
+
+# Can also override in the config file
+start_step: 4
+```
+
+| Step | Number |
+|------|--------|
+| Setup directories | `0` |
+| Convert to TIFF | `1` |
+| VALIS alignment | `4` |
+| Preprocess high-res DAPI | `3` |
+| Warp moving DAPI | `5` |
+| Recommend MIRAGE parameters | `51` |
+| MIRAGE non-linear registration | `6` |
+| Evaluate MIRAGE alignment | `61` |
+| Warp all channels + pyramid | `7` |
+| CellPose segmentation | `8` |
+| SSIM quality checks | `10` |
+| Convert masks to GeoDataFrame | `11` |
+| Combine masks | `12` |
+
+### Viewing results
+
+After a run completes (or mid-run), generate a QC HTML report:
+
+```bash
+segmentation-tools view -o /path/to/output -j my_sample
+# Opens results/qc_report.html in your browser
+# Use --no-browser to just write the file
+```
+
+The report includes:
+- Pipeline status and last completed step
+- Registration quality metrics (rotation angle, scale, translation, centroid distances before/after MIRAGE)
+- Cell counts per segmentation mode
+- Alignment overlay images (VALIS before/after, pre-MIRAGE overlay, displacement quiver plots)
+
+---
+
+## Pipeline Steps
+
+### Step 1: Convert to TIFF
+Converts the fixed and moving images to OME-TIFF using `bioformats2raw` + `raw2ometiff`. Accepts most microscopy formats (.nd2, .czi, .mrxs, .tiff, etc.).
+
+**Outputs:** `.checkpoints/fixed.tiff`, `.checkpoints/moving.tiff`
+
+### Step 4: VALIS Alignment
+Runs VALIS rigid/affine registration on the DAPI channels of both images. Handles cross-modality registration (fluorescence vs fluorescence), including automatic detection of reflections and rotations. Non-rigid registration is disabled — MIRAGE handles that.
+
+**Outputs:** `.checkpoints/linear_transform.npy` (3×3 inverse map matrix)
+
+### Step 3: Preprocess High-Res DAPI
+Extracts the DAPI channel at full resolution from both images, applies quantile normalization (1st–99th percentile clip) + CLAHE + multi-Otsu threshold. These preprocessed images are used as MIRAGE inputs.
+
+**Outputs:** `.checkpoints/high_res_fixed_dapi_filtered_level_0.npy`, `.checkpoints/high_res_moving_dapi_filtered_level_0.npy`
+
+### Step 5: Warp Moving DAPI
+Applies the VALIS affine transform to the preprocessed high-res moving DAPI image. This linearly-warped image is the starting point for MIRAGE.
+
+**Output:** `.checkpoints/moving_dapi_linear_warped.npy`
+
+### Step 5b: Recommend MIRAGE Parameters
+Samples 5 tissue crops (1000×1000 px), extracts nuclei centroids, matches them between fixed and moving images via KDTree nearest-neighbor, and recommends MIRAGE hyperparameters (offset, pad, smoothness_radius, pos_encoding_L, dissim_sigma) based on the displacement statistics and nucleus size.
+
+**Outputs:** `.checkpoints/recommended_mirage_params.npy`, `results/centroid_quiver_crop_*.png`, `results/mirage_param_recommendation.png`
+
+### Step 6: MIRAGE Non-Linear Registration
+Trains a coordinate-based neural network (TensorFlow) to predict a dense per-pixel displacement field that corrects residual non-linear distortions after the affine alignment. Automatically loads the parameters recommended by step 5b.
+
+**Output:** `.checkpoints/mirage_transform.npy`
+
+### Step 6b: Evaluate MIRAGE Alignment
+Applies the MIRAGE transform to the same tissue crops used for parameter recommendation and computes centroid matching distances before and after correction. Generates before/after overlay plots.
+
+**Outputs:** `results/centroid_eval_crop_*.png`, `results/centroid_eval_summary.png`
+
+### Step 7: Warp All Channels
+Combines the VALIS linear transform and MIRAGE displacement field, then applies the composite warp to all channels of the moving image. Builds a multi-resolution OME-TIFF pyramid using pyvips.
+
+**Output:** `results/moving_complete_transform.ome.tiff`
+
+### Step 8: CellPose Segmentation
+Runs CellPose segmentation three ways: membrane+DAPI combined, DAPI-only, membrane-only. Results are stored as labeled mask arrays.
+
+**Outputs:** `results/membrane_dapi_segmentation_masks.npy`, `results/dapi_segmentation_masks.npy`, `results/membrane_segmentation_masks.npy`
+
+### Steps 11–12: Masks to GeoDataFrame
+Converts segmentation masks to polygon GeoDataFrames and saves as GeoParquet for downstream spatial analysis (e.g., cell-by-gene matrix construction).
+
+**Outputs:** `results/*.parquet`
+
+---
+
+## Output Structure
+
+```
+<output_root>/<job_title>/
+├── .checkpoints/
+│   ├── fixed.tiff                          # Converted fixed image
+│   ├── moving.tiff                         # Converted moving image
+│   ├── linear_transform.npy                # VALIS affine transform (3×3 inverse map)
+│   ├── mirage_transform.npy                # MIRAGE displacement field (H×W×2)
+│   ├── recommended_mirage_params.npy       # Auto-recommended MIRAGE hyperparameters
+│   ├── high_res_fixed_dapi_filtered_level_0.npy
+│   ├── high_res_moving_dapi_filtered_level_0.npy
+│   ├── moving_dapi_linear_warped.npy       # DAPI after affine warp (MIRAGE input)
+│   ├── pipeline_status.txt                 # Last completed step (for QC viewer)
+│   └── valis_output/                       # VALIS intermediate files + overlap images
+└── results/
+    ├── moving_complete_transform.ome.tiff  # Final warped multi-channel image (pyramidal)
+    ├── *_segmentation_masks.npy            # CellPose masks (3 variants)
+    ├── *_segmentation_masks.parquet        # Mask polygons as GeoDataFrame
+    ├── centroid_quiver_crop_*.png          # Pre-MIRAGE displacement visualization
+    ├── centroid_eval_crop_*.png            # Before/after MIRAGE centroid alignment
+    ├── centroid_eval_summary.png           # Aggregate alignment improvement plot
+    ├── mirage_param_recommendation.png     # Recommended MIRAGE parameter table
+    └── qc_report.html                      # Full QC report (generated by `view` command)
+```
+
+---
+
+## Requirements
+
+**Python:** 3.8+
+
+**Key dependencies:**
+- `valis-wsi` — multi-resolution affine registration
+- `tensorflow` — MIRAGE non-linear registration (GPU required)
+- `cellpose` — cell segmentation
+- `pyvips` / `tifffile` — image I/O and pyramid building
+- `opencv-python` — image processing
+- `scikit-image`, `scipy`, `numpy` — image analysis utilities
+- `geopandas`, `shapely` — spatial mask handling
+- `typer`, `loguru` — CLI and logging
+
+**Hardware:** A CUDA-capable GPU is required for MIRAGE (step 6). All other steps run on CPU.
+
+**Conda environment:** The pipeline is tested against the `contamination` conda environment at `/usersoftware/peerd/ghoshr/.conda/envs/contamination/`.

@@ -168,7 +168,6 @@ def main(warped_file_path, fixed_file_path, checkpoint_dir,
     logger.info(f"MIRAGE transform saved to {mirage_transform_file_path}")
     return 0
 
-
 if __name__ == "__main__":
     args = parse_arguments()
     checkpoint_dir = Path(args.warped_file_path).parent

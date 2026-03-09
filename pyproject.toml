@@ -19,7 +19,10 @@ dependencies = [
   "cellpose",
   "stardist",
   "scanpy",
-  "shapely"
+  "shapely",
+  "typer",
+  "loguru",
+  "pyyaml"
 ]
 
 [project.optional-dependencies]
