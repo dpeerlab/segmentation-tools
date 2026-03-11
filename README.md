@@ -132,7 +132,7 @@ Each step has a number. Pass `--start-step N` to skip all steps before N:
 
 ```bash
 # Re-run from VALIS alignment onward (skips TIFF conversion)
-segmentation-tools submit --config my_sample.yaml --start-step 4
+segmentation-tools submit --config my_sample.yaml --start-step 2
 
 # Re-run from MIRAGE onward (skips alignment entirely)
 segmentation-tools submit --config my_sample.yaml --start-step 6
@@ -178,7 +178,7 @@ Converts the fixed and moving images to OME-TIFF using `bioformats2raw` + `raw2o
 
 **Outputs:** `.checkpoints/fixed.tiff`, `.checkpoints/moving.tiff`
 
-### Step 4: VALIS Alignment
+### Step 2: VALIS Alignment
 Runs VALIS rigid/affine registration on the DAPI channels of both images. Handles cross-modality registration (fluorescence vs fluorescence), including automatic detection of reflections and rotations. Non-rigid registration is disabled — MIRAGE handles that.
 
 **Outputs:** `.checkpoints/linear_transform.npy` (3×3 inverse map matrix)
@@ -188,12 +188,12 @@ Extracts the DAPI channel at full resolution from both images, applies quantile 
 
 **Outputs:** `.checkpoints/high_res_fixed_dapi_filtered_level_0.npy`, `.checkpoints/high_res_moving_dapi_filtered_level_0.npy`
 
-### Step 5: Warp Moving DAPI
+### Step 4: Warp Moving DAPI
 Applies the VALIS affine transform to the preprocessed high-res moving DAPI image. This linearly-warped image is the starting point for MIRAGE.
 
 **Output:** `.checkpoints/moving_dapi_linear_warped.npy`
 
-### Step 5b: Recommend MIRAGE Parameters
+### Step 5: Recommend MIRAGE Parameters
 Samples 5 tissue crops (1000×1000 px), extracts nuclei centroids, matches them between fixed and moving images via KDTree nearest-neighbor, and recommends MIRAGE hyperparameters (offset, pad, smoothness_radius, pos_encoding_L, dissim_sigma) based on the displacement statistics and nucleus size.
 
 **Outputs:** `.checkpoints/recommended_mirage_params.npy`, `results/centroid_quiver_crop_*.png`, `results/mirage_param_recommendation.png`
