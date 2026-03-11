@@ -24,7 +24,8 @@ cellpose_membrane_channel: 0
 # mirage_num_steps: 2048
 
 # --- Resume ---
-start_step: 0   # Set > 0 to resume from a specific step
+start_step: 1   # First step to run (1-9, default: 1 = start from beginning)
+end_step: 9     # Last step to run  (1-9, default: 9 = run to end)
 
 # --- SLURM (only used by `submit` command) ---
 slurm:

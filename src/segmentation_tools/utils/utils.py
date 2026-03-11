@@ -56,99 +56,95 @@ def normalize(
     return img_clahe.astype(np.float32) / 65535.0
 
 def get_multiotsu_threshold(image, n_samples=20, visualize=False):
-    """
-    Finds the first Multi-Otsu threshold by averaging results from sampled patches.
+    """Find the lowest Multi-Otsu threshold by averaging results from sampled patches.
+
+    Tries multi-Otsu with decreasing numbers of classes (4 → 3 → 2) per patch
+    so it works regardless of how many distinct intensity modes the tissue has.
+    The first threshold separates background from signal in all cases.
 
     Args:
-        image (np.array): The input image (e.g., moving_warped).
-        n_samples (int): The required number of valid glimpses to sample.
-        visualize (bool): If True, plots the thresholded glimpses.
+        image (np.array): 2D float image in [0, 1].
+        n_samples (int): Number of valid patches to accumulate before returning.
+        visualize (bool): If True, plots the thresholded patches.
 
     Returns:
-        float: The averaged first threshold (thresholds[0]).
+        float: Mean of the lowest Otsu threshold across all valid patches.
     """
     H, W = image.shape
-    
-    # --- 1. Determine Glimpse Size (Heuristic: 20% of min dim, capped at 1000) ---
-    min_dim = min(H, W)
-    glimpse_dim = np.clip(int(min_dim * 0.2), 100, 1000)
 
-    logger.info(f"Image shape: ({H}, {W}) -> Glimpse size: {glimpse_dim}x{glimpse_dim}")
-    
-    # --- Plotting Setup (If requested) ---
-    if visualize and n_samples > 0:
+    # Glimpse size: 20% of shorter dimension, clamped to [100, 1000]
+    glimpse_dim = int(np.clip(int(min(H, W) * 0.2), 100, 1000))
+    logger.info(f"Image shape: ({H}, {W}) -> glimpse size: {glimpse_dim}px")
+
+    if visualize:
         rows = int(np.ceil(np.sqrt(n_samples)))
         cols = int(np.ceil(n_samples / rows))
         _, axes = plt.subplots(rows, cols, figsize=(3 * cols, 3 * rows))
         axes = axes.flatten()
         plot_index = 0
-    
-    # --- 2. Sample Glimpses and Calculate Thresholds ---
+
     valid_thresholds = []
     attempts = 0
     max_attempts = n_samples * 10
-    
+
     while len(valid_thresholds) < n_samples and attempts < max_attempts:
         attempts += 1
-        
-        # Determine random crop coordinates
+
         max_y, max_x = H - glimpse_dim, W - glimpse_dim
-        
-        # Handle images smaller than the minimum glimpse size
-        if max_y < 0 or max_x < 0:
+        if max_y <= 0 or max_x <= 0:
             glimpse = image
         else:
             y = np.random.randint(0, max_y + 1)
             x = np.random.randint(0, max_x + 1)
             glimpse = image[y : y + glimpse_dim, x : x + glimpse_dim]
 
-        # --- 3. Check for Signal (Variance is more robust than max/min or non-zero count) ---
-        # Skip if the patch is near-constant (low variance)
-        if np.var(glimpse) < 1e-2: 
+        # Skip near-constant patches (background or saturated regions)
+        if np.var(glimpse) < 1e-4:
             continue
-            
-        # --- 4. Run Otsu and Store Result ---
-        try:
-            # Multi-Otsu on the glimpse (classes=4)
-            thresholds = threshold_multiotsu(glimpse, classes=4)
-            masked_glimpse = np.where(glimpse < thresholds[0], 0, glimpse)
-            if np.all(masked_glimpse - glimpse == 0):
+
+        # Try multi-Otsu with decreasing class counts until one succeeds.
+        # classes=2 is standard Otsu (always succeeds for non-constant images).
+        threshold = None
+        for n_classes in [4, 3, 2]:
+            try:
+                thresholds = threshold_multiotsu(glimpse, classes=n_classes)
+                t = thresholds[0]
+                # Reject if threshold doesn't actually separate anything
+                if np.any(glimpse < t) and np.any(glimpse >= t):
+                    threshold = t
+                    break
+            except (RuntimeError, ValueError):
                 continue
 
-            # thresholds = [skimage.filters.threshold_otsu(glimpse)]
-            valid_thresholds.append(thresholds[0])
-            
-            # --- Visualization ---
-            if visualize and plot_index < len(axes):
-                ax = axes[plot_index]
-                # Binarize using the first threshold
-                ax.imshow(masked_glimpse - glimpse, cmap="gray")
-                # ax.imshow(np.power(masked_glimpse, 0.1), cmap="gray")
-                ax.set_title(f'Threshold: {thresholds[0]:.2f}')
-                ax.axis('off')
-                plot_index += 1
-                
-        except (RuntimeError, ValueError):
-            # Fails if the glimpse doesn't have enough distinct modes for 4 classes
+        if threshold is None:
             continue
 
-    # --- 5. Final Result ---
+        valid_thresholds.append(threshold)
+
+        if visualize and plot_index < len(axes):
+            masked = np.where(glimpse < threshold, 0, glimpse)
+            axes[plot_index].imshow(masked, cmap="gray")
+            axes[plot_index].set_title(f"t={threshold:.3f}")
+            axes[plot_index].axis("off")
+            plot_index += 1
+
     if not valid_thresholds:
         raise ValueError(
-            "Could not find any valid, multi-modal glimpses to calculate the threshold."
-            " Try a smaller 'n_samples' or check your image content."
+            "Could not find valid patches to compute a threshold. "
+            "Check that the image contains tissue signal."
         )
-    
+
     if visualize:
-        # Fill any unused subplots and display
         for i in range(plot_index, len(axes)):
-            axes[i].axis('off')
+            axes[i].axis("off")
         plt.tight_layout()
         plt.show()
 
-    final_threshold = np.mean(valid_thresholds)
-    logger.info(f"\nFound {len(valid_thresholds)} valid thresholds out of {attempts} attempts.")
-    
+    final_threshold = float(np.mean(valid_thresholds))
+    logger.info(
+        f"Otsu threshold: {final_threshold:.4f} "
+        f"(from {len(valid_thresholds)} patches, {attempts} attempts)"
+    )
     return final_threshold
 
 

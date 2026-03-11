@@ -1,87 +1,78 @@
 """VALIS-based rigid/affine alignment of moving image to fixed reference.
 
-Replaces the multi-step SIFT pipeline (steps 002-004) with a single VALIS
-registration call. Produces ``linear_transform.npy`` (3×3 inverse map matrix)
-compatible with downstream steps 005, 007.
+Replaces the multi-step SIFT pipeline with a single VALIS registration call.
+Produces ``linear_transform.npy`` (3×3 inverse map matrix) compatible with
+downstream steps 005, 007.
 
-VALIS handles multi-resolution feature detection, matching, and affine
-optimization automatically. Non-rigid registration is disabled here because
-MIRAGE (step 006) handles that.
+Design decisions
+----------------
+SimilarityTransform (VALIS default) is the right transform class:
+- EuclideanTransform (rotation + translation) is too rigid — doesn't handle
+  the scale difference between Xenium and IF (different pixel sizes).
+- SimilarityTransform (rotation + uniform scale + translation) is correct.
+  Xenium and IF image the same physical tissue, so any scale difference is
+  uniform across the field of view.
+- AffineTransform adds independent x/y scale and shear, which are physically
+  unmotivated for flat tissue imaged by two modalities.
+- ProjectiveTransform adds perspective distortion, which is wrong here.
+
+VALIS reads OME-TIFF natively, but its reader selection logic always prefers
+pyvips when the file extension is recognised (e.g. .tiff). pyvips silently
+returns zeros for JPEG2000-compressed TIFFs (compression code 34712), which
+the Xenium morphology image uses. We detect JPEG2000 files and pass them to
+VALIS via reader_dict with BioFormatsSlideReader, which handles JPEG2000
+correctly and benefits from the pyramid for fast level-of-detail reads.
+All files are symlinked into a staging directory (zero I/O cost).
+
+check_for_reflections=True tests all 3 non-trivial flip variants (x-flip,
+y-flip, xy-flip) and picks the one with lowest registration error. This
+handles the horizontal flip between Xenium and IF automatically.
+The default VALIS affine optimizer (AffineOptimizerMattesMI) is used.
 """
 
 from pathlib import Path
 import argparse
+import os
 import shutil
 import warnings
 
 import numpy as np
 import tifffile
 from loguru import logger
-from skimage.transform import AffineTransform
 
-from segmentation_tools.utils.profiling import profile_step, profile_block, log_array
+from segmentation_tools.utils.profiling import profile_step, profile_block
+
+# pyvips silently returns zeros for JPEG2000-compressed TIFFs.
+_JPEG2000_COMPRESSION = 34712
 
 
-def _extract_dapi_channel(tiff_path, channel_idx, output_path):
-    """Extract a single DAPI channel from a multi-channel TIFF and save it.
-
-    Parameters
-    ----------
-    tiff_path : Path
-        Path to multi-channel OME-TIFF.
-    channel_idx : int
-        Channel index for DAPI.
-    output_path : Path
-        Where to write the single-channel TIFF.
-
-    Returns
-    -------
-    np.ndarray
-        The extracted channel data.
-    """
-    img = tifffile.imread(str(tiff_path), series=0, level=0, key=channel_idx)
-    tifffile.imwrite(str(output_path), img, compression="zlib")
-    logger.info(f"Extracted channel {channel_idx} from {tiff_path.name} -> {output_path.name}")
-    log_array("Extracted channel", img)
-    return img
+def _is_jpeg2000(tiff_path):
+    """Return True if the TIFF uses JPEG2000 compression (pyvips-incompatible)."""
+    with tifffile.TiffFile(str(tiff_path)) as tf:
+        return tf.pages[0].compression == _JPEG2000_COMPRESSION
 
 
 def _scale_matrix_to_full_res(M, processed_shape_rc, full_shape_rc):
     """Scale a transform matrix from processed resolution to full resolution.
 
     VALIS computes M at a downsampled (processed) resolution. To apply it at
-    full resolution, we conjugate with scaling matrices:
+    full resolution we conjugate with scaling matrices:
 
         M_full = S_up @ M_proc @ S_down
-
-    where S_up scales from processed to full, and S_down scales from full to
-    processed.
 
     Parameters
     ----------
     M : np.ndarray (3, 3)
-        Transform matrix at processed resolution.
-    processed_shape_rc : tuple
-        (rows, cols) of the processed image.
-    full_shape_rc : tuple
-        (rows, cols) of the full-resolution image.
-
-    Returns
-    -------
-    np.ndarray (3, 3)
-        Transform matrix at full resolution.
+    processed_shape_rc : tuple  (rows, cols) at processed resolution
+    full_shape_rc : tuple  (rows, cols) at full resolution
     """
     sy = full_shape_rc[0] / processed_shape_rc[0]
     sx = full_shape_rc[1] / processed_shape_rc[1]
 
-    # Scale up: processed -> full res
     S_up = np.array([[sx, 0, 0],
                      [0, sy, 0],
                      [0,  0, 1]], dtype=np.float64)
-
-    # Scale down: full res -> processed
     S_down = np.linalg.inv(S_up)
-
     return S_up @ M @ S_down
 
 
@@ -105,46 +96,73 @@ def main(fixed_file_path, moving_file_path, fixed_dapi_channel,
         logger.info(f"Linear transform already exists at {output_path}. Skipping.")
         return 0
 
-    # --- 1. Prepare VALIS input directory with single-channel DAPI images ---
+    # --- 1. Prepare VALIS input/output directories ---
+    # Always wipe valis_output to avoid VALIS getting confused by stale state
+    # from previous failed runs (it warns and misbehaves if n_images changes).
     valis_input_dir = checkpoint_dir / "valis_input"
     valis_output_dir = checkpoint_dir / "valis_output"
-    valis_input_dir.mkdir(exist_ok=True)
-    valis_output_dir.mkdir(exist_ok=True)
+    if valis_output_dir.exists():
+        shutil.rmtree(valis_output_dir)
+    if valis_input_dir.exists():
+        shutil.rmtree(valis_input_dir)
+    valis_input_dir.mkdir()
+    valis_output_dir.mkdir()
 
-    with profile_block("Extract DAPI channels"):
-        # Prefix with 00_/01_ to ensure VALIS ordering (fixed first)
-        fixed_dapi_path = valis_input_dir / "00_fixed_dapi.tiff"
-        moving_dapi_path = valis_input_dir / "01_moving_dapi.tiff"
+    # Symlink originals with ordered names so VALIS sees them in the right
+    # sequence (it sorts filenames). Preserve the suffix so VALIS picks the
+    # right format reader as a fallback.
+    fixed_suffix = "".join(fixed_file_path.suffixes)
+    moving_suffix = "".join(moving_file_path.suffixes)
+    fixed_staged = valis_input_dir / f"00_fixed{fixed_suffix}"
+    moving_staged = valis_input_dir / f"01_moving{moving_suffix}"
+    os.symlink(fixed_file_path.resolve(), fixed_staged)
+    os.symlink(moving_file_path.resolve(), moving_staged)
+    logger.info(f"Staged {fixed_file_path.name} (DAPI ch={fixed_dapi_channel}) -> {fixed_staged.name}")
+    logger.info(f"Staged {moving_file_path.name} (DAPI ch={moving_dapi_channel}) -> {moving_staged.name}")
 
-        _extract_dapi_channel(fixed_file_path, fixed_dapi_channel, fixed_dapi_path)
-        _extract_dapi_channel(moving_file_path, moving_dapi_channel, moving_dapi_path)
+    # --- 2. Run VALIS registration ---
+    from valis import registration, slide_io
 
-    # --- 2. Run VALIS registration (rigid/affine only) ---
-    # Import here to keep valis an optional dependency
-    from valis import registration
+    # VALIS prefers pyvips based purely on file extension, without checking
+    # compression. Build a reader_dict to force BioFormatsSlideReader for any
+    # JPEG2000-compressed file (pyvips silently returns zeros for those).
+    # reader_dict values are (reader_class, kwargs) tuples per the VALIS API.
+    slide_io.init_jvm()
+    reader_dict = {}
+    for staged, src in [(fixed_staged, fixed_file_path), (moving_staged, moving_file_path)]:
+        if _is_jpeg2000(src):
+            logger.info(
+                f"{src.name} uses JPEG2000 compression — using BioFormatsSlideReader"
+            )
+            reader_dict[str(staged)] = (slide_io.BioFormatsSlideReader, {})
+
+    # Channel selection: VALIS applies if_processing_kwargs to all images.
+    # The fixed is single-channel so the channel param is ignored for it.
+    if_kwargs = {"channel": moving_dapi_channel, "adaptive_eq": True}
 
     with profile_block("VALIS registration"):
         registrar = registration.Valis(
-            str(valis_input_dir),
-            str(valis_output_dir),
+            src_dir=str(valis_input_dir),
+            dst_dir=str(checkpoint_dir),
+            name="valis_output",
             imgs_ordered=True,
-            reference_img_f="00_fixed_dapi.tiff",
+            reference_img_f=fixed_staged.name,
             align_to_reference=True,
-            non_rigid_registrar_cls=None,  # Skip non-rigid; MIRAGE handles this
+            non_rigid_registrar_cls=None,       # MIRAGE handles non-rigid
             image_type="fluorescence",
-            check_for_reflections=True,  # Tests all 4 flip variants, picks best by keypoint matches
+            check_for_reflections=True,         # Detect x/y/xy flips automatically
         )
-        # Suppress VALIS's FutureWarnings from deprecated scikit-image API calls.
-        # Also catch AttributeError from VALIS's cleanup() when non_rigid_registrar_cls=None
-        # — registration itself completes successfully before cleanup runs.
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=FutureWarning, module="valis")
             warnings.filterwarnings("ignore", category=UserWarning, module="valis")
             try:
-                _, _, error_df = registrar.register()
+                _, _, error_df = registrar.register(
+                    reader_dict=reader_dict or None,
+                    if_processing_kwargs=if_kwargs,
+                )
             except AttributeError as e:
                 if "non_rigid_reg_kwargs" in str(e):
-                    logger.warning(f"VALIS cleanup error (non-fatal, registration completed): {e}")
+                    logger.warning(f"VALIS cleanup error (non-fatal): {e}")
                     error_df = None
                 else:
                     raise
@@ -153,9 +171,10 @@ def main(fixed_file_path, moving_file_path, fixed_dapi_channel,
     if error_df is not None:
         logger.info(f"Registration error summary:\n{error_df.to_string()}")
 
-    # --- 3. Extract transform for the moving slide ---
-    # VALIS keys slide_dict by filename stem (without extension)
-    moving_slide = registrar.slide_dict.get("01_moving_dapi")
+    # --- 3. Extract transform ---
+    # Slide dict keys are the filename stem (first dot-separated part).
+    moving_stem = moving_staged.name.split(".")[0]   # "01_moving"
+    moving_slide = registrar.slide_dict.get(moving_stem)
     if moving_slide is None:
         for key, slide in registrar.slide_dict.items():
             if "moving" in key.lower():
@@ -168,13 +187,11 @@ def main(fixed_file_path, moving_file_path, fixed_dapi_channel,
             f"Available keys: {list(registrar.slide_dict.keys())}"
         )
 
-    # VALIS M is a forward transform (moving -> fixed) at processed resolution.
-    # If registration failed entirely, M will be None — raise clearly.
     forward_M = moving_slide.M
     if forward_M is None:
         raise RuntimeError(
             "VALIS registration failed: slide.M is None. "
-            "Check that the DAPI channels are correct and the images have sufficient overlap."
+            "Check that the DAPI channels are correct and the images overlap."
         )
     logger.info(f"VALIS forward transform (processed res):\n{forward_M}")
 
@@ -182,58 +199,35 @@ def main(fixed_file_path, moving_file_path, fixed_dapi_channel,
     full_shape_rc = moving_slide.slide_shape_rc
     logger.info(f"Processed shape: {processed_shape_rc}, Full shape: {full_shape_rc}")
 
-    # Scale M to full resolution
     with profile_block("Scale and invert transform"):
         forward_M_full = _scale_matrix_to_full_res(
             forward_M, processed_shape_rc, full_shape_rc
         )
         logger.info(f"VALIS forward transform (full res):\n{forward_M_full}")
-
-        # Invert: step 005 and 007 expect the inverse map (fixed -> moving)
-        # This is the convention used by skimage.transform.warp
+        # Invert: downstream steps expect inverse map (fixed -> moving)
         inverse_M = np.linalg.inv(forward_M_full)
 
     logger.info(f"Inverse transform (linear_transform.npy):\n{inverse_M}")
 
-    # --- 4. Save ---
     np.save(output_path, inverse_M)
     logger.info(f"Linear transform saved to {output_path}")
-
-    # --- 5. Cleanup ---
-    # Optionally clean up valis working directories (keep input for debugging)
-    # shutil.rmtree(valis_output_dir, ignore_errors=True)
-
     return 0
 
 
 def parse_arguments():
-    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description="Run VALIS rigid/affine alignment on fixed and moving images."
     )
-    parser.add_argument(
-        "--fixed-file-path", required=True, type=str,
-        help="Path to the fixed TIFF file.",
-    )
-    parser.add_argument(
-        "--moving-file-path", required=True, type=str,
-        help="Path to the moving TIFF file.",
-    )
-    parser.add_argument(
-        "--fixed-dapi-channel", type=int, default=0,
-        help="DAPI channel index in the fixed image (default: 0).",
-    )
-    parser.add_argument(
-        "--moving-dapi-channel", type=int, default=1,
-        help="DAPI channel index in the moving image (default: 1).",
-    )
+    parser.add_argument("--fixed-file-path", required=True, type=str)
+    parser.add_argument("--moving-file-path", required=True, type=str)
+    parser.add_argument("--fixed-dapi-channel", type=int, default=0)
+    parser.add_argument("--moving-dapi-channel", type=int, default=1)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_arguments()
     checkpoint_dir = Path(args.fixed_file_path).parent
-
     main(
         fixed_file_path=args.fixed_file_path,
         moving_file_path=args.moving_file_path,

@@ -9,31 +9,30 @@ Run from a config file (recommended):
 Run from CLI flags:
     segmentation-tools run -f fixed.tiff -m moving.nd2 -o /output -j my_sample
 
-Resume from a specific step:
-    segmentation-tools run --config my_sample.yaml --start-step 4
-    segmentation-tools submit --config my_sample.yaml --start-step 4
+Run a specific step range:
+    segmentation-tools run --config my_sample.yaml --start-step 2 --end-step 2
+    segmentation-tools run --config my_sample.yaml --start-step 6 --end-step 9
 
-Generate QC report after a run:
+Pick steps interactively:
+    segmentation-tools run --config my_sample.yaml --pick-steps
+
+Generate QC report:
     segmentation-tools view -o /output -j my_sample
 
-Print a sample config to stdout:
+Print a sample config:
     segmentation-tools init-config
 
-Step numbers
-------------
-  0   Setup directories
-  1   Convert to TIFF
-  3   Preprocess high-res images (DAPI normalization + Otsu)
-  4   VALIS alignment (rigid/affine)
-  5   Warp moving DAPI with linear transform
-  51  Recommend MIRAGE parameters
-  6   MIRAGE non-linear registration
-  61  Evaluate MIRAGE alignment
-  7   Warp all channels + build pyramid
-  8   CellPose segmentation
-  10  SSIM quality checks
-  11  Convert masks to GeoDataFrame
-  12  Combine masks
+Pipeline steps
+--------------
+  1  Setup directories + convert to OME-TIFF
+  2  VALIS rigid/affine alignment
+  3  Preprocess high-res DAPI (normalize + Otsu filter)
+  4  Apply linear transform to moving DAPI
+  5  Recommend MIRAGE hyperparameters
+  6  MIRAGE non-linear registration
+  7  Evaluate MIRAGE alignment quality
+  8  Warp all channels + build pyramid OME-TIFF
+  9  CellPose segmentation + masks to GeoDataFrame parquet
 """
 
 from pathlib import Path
@@ -55,6 +54,42 @@ app = typer.Typer(
 PIPELINE_SCRIPT = Path(__file__).parent / "pipeline.sh"
 CONFIG_EXAMPLE = Path(__file__).parent / "config_example.yaml"
 
+STEPS = {
+    1: "Setup directories + convert to OME-TIFF",
+    2: "VALIS rigid/affine alignment",
+    3: "Preprocess high-res DAPI (normalize + Otsu filter)",
+    4: "Apply linear transform to moving DAPI",
+    5: "Recommend MIRAGE hyperparameters",
+    6: "MIRAGE non-linear registration",
+    7: "Evaluate MIRAGE alignment quality",
+    8: "Warp all channels + build pyramid OME-TIFF",
+    9: "CellPose segmentation + masks to GeoDataFrame parquet",
+}
+
+
+def _print_steps():
+    print("\nAvailable pipeline steps:")
+    print("─" * 52)
+    for num, name in STEPS.items():
+        print(f"  {num}  {name}")
+    print("─" * 52)
+
+
+def _pick_steps_interactively() -> tuple[int, int]:
+    """Print steps and ask user to enter a start and end step."""
+    _print_steps()
+    print()
+    while True:
+        try:
+            start = int(input("  Start step [1-9]: ").strip())
+            end = int(input("  End step   [1-9]: ").strip())
+            if 1 <= start <= 9 and 1 <= end <= 9 and start <= end:
+                return start, end
+            print("  Invalid range. Start must be <= end, both between 1-9.")
+        except (ValueError, KeyboardInterrupt):
+            print("\nCancelled.")
+            raise typer.Exit(0)
+
 
 def _build_config(
     config: Optional[Path],
@@ -63,12 +98,11 @@ def _build_config(
     output_root: Optional[Path],
     job_title: Optional[str],
     start_step: int,
+    end_step: int,
     fixed_dapi_channel: int,
     moving_dapi_channel: int,
 ) -> RunConfig:
-    """Merge config file (if given) with explicit CLI overrides."""
     cfg = load_config(config) if config else RunConfig()
-
     if fixed_file:
         cfg.fixed_file = fixed_file
     if moving_file:
@@ -77,13 +111,14 @@ def _build_config(
         cfg.output_root = output_root
     if job_title:
         cfg.job_title = job_title
-    if start_step != 0:
+    if start_step != 1:
         cfg.start_step = start_step
+    if end_step != 9:
+        cfg.end_step = end_step
     if fixed_dapi_channel != 0:
         cfg.fixed_dapi_channel = fixed_dapi_channel
     if moving_dapi_channel != 1:
         cfg.moving_dapi_channel = moving_dapi_channel
-
     return cfg
 
 
@@ -91,29 +126,35 @@ def _build_config(
 def run(
     config: Optional[Path] = typer.Option(None, "--config", "-c",
         help="Path to YAML config file. CLI flags override config values."),
-    fixed_file: Optional[Path] = typer.Option(None, "-f", "--fixed-file",
-        help="Path to fixed image (Xenium OME-TIFF)."),
-    moving_file: Optional[Path] = typer.Option(None, "-m", "--moving-file",
-        help="Path to moving image (IF, e.g. .nd2 or .tiff)."),
-    output_root: Optional[Path] = typer.Option(None, "-o", "--output-root",
-        help="Root output directory."),
-    job_title: Optional[str] = typer.Option(None, "-j", "--job-title",
-        help="Job name; results written to output_root/job_title/."),
-    start_step: int = typer.Option(0, "--start-step",
-        help="Step number to resume from (0 = run all)."),
+    fixed_file: Optional[Path] = typer.Option(None, "-f", "--fixed-file"),
+    moving_file: Optional[Path] = typer.Option(None, "-m", "--moving-file"),
+    output_root: Optional[Path] = typer.Option(None, "-o", "--output-root"),
+    job_title: Optional[str] = typer.Option(None, "-j", "--job-title"),
+    start_step: int = typer.Option(1, "--start-step",
+        help="First step to run (1-9, default: 1)."),
+    end_step: int = typer.Option(9, "--end-step",
+        help="Last step to run (1-9, default: 9). Use with --start-step to run a single step."),
+    pick_steps: bool = typer.Option(False, "--pick-steps",
+        help="Interactively select which steps to run."),
     fixed_dapi_channel: int = typer.Option(0, "--fixed-dapi-channel"),
     moving_dapi_channel: int = typer.Option(1, "--moving-dapi-channel"),
-    skip_validation: bool = typer.Option(False, "--skip-validation",
-        help="Skip input validation checks."),
+    skip_validation: bool = typer.Option(False, "--skip-validation"),
 ):
     """Run the alignment + segmentation pipeline locally."""
     cfg = _build_config(config, fixed_file, moving_file, output_root, job_title,
-                        start_step, fixed_dapi_channel, moving_dapi_channel)
+                        start_step, end_step, fixed_dapi_channel, moving_dapi_channel)
+
+    if pick_steps:
+        cfg.start_step, cfg.end_step = _pick_steps_interactively()
+        print(f"\n  Running steps {cfg.start_step}–{cfg.end_step}:")
+        for n in range(cfg.start_step, cfg.end_step + 1):
+            print(f"    {n}  {STEPS[n]}")
+        print()
 
     if not skip_validation:
         logger.info("Validating inputs...")
         if not validate_config(cfg):
-            logger.error("Validation failed. Fix the errors above or use --skip-validation.")
+            logger.error("Validation failed. Fix errors above or use --skip-validation.")
             raise typer.Exit(1)
         logger.success("Validation passed.")
 
@@ -128,9 +169,10 @@ def run(
         str(cfg.moving_file),
         str(cfg.output_root),
         str(cfg.start_step),
+        str(cfg.end_step),
     ]
 
-    logger.info(f"Starting pipeline: {cfg.job_title} (start_step={cfg.start_step})")
+    logger.info(f"Pipeline: {cfg.job_title} | steps {cfg.start_step}–{cfg.end_step}")
     result = subprocess.run(cmd)
     if result.returncode != 0:
         raise typer.Exit(result.returncode)
@@ -138,14 +180,17 @@ def run(
 
 @app.command("submit")
 def submit(
-    config: Optional[Path] = typer.Option(None, "--config", "-c",
-        help="Path to YAML config file. CLI flags override config values."),
+    config: Optional[Path] = typer.Option(None, "--config", "-c"),
     fixed_file: Optional[Path] = typer.Option(None, "-f", "--fixed-file"),
     moving_file: Optional[Path] = typer.Option(None, "-m", "--moving-file"),
     output_root: Optional[Path] = typer.Option(None, "-o", "--output-root"),
     job_title: Optional[str] = typer.Option(None, "-j", "--job-title"),
-    start_step: int = typer.Option(0, "--start-step",
-        help="Step number to resume from (0 = run all)."),
+    start_step: int = typer.Option(1, "--start-step",
+        help="First step to run (default: 1)."),
+    end_step: int = typer.Option(9, "--end-step",
+        help="Last step to run (default: 9)."),
+    pick_steps: bool = typer.Option(False, "--pick-steps",
+        help="Interactively select which steps to run before submitting."),
     fixed_dapi_channel: int = typer.Option(0, "--fixed-dapi-channel"),
     moving_dapi_channel: int = typer.Option(1, "--moving-dapi-channel"),
     conda_env: Optional[str] = typer.Option(None, "--conda-env"),
@@ -161,9 +206,15 @@ def submit(
 ):
     """Submit the pipeline as a SLURM job via sbatch."""
     cfg = _build_config(config, fixed_file, moving_file, output_root, job_title,
-                        start_step, fixed_dapi_channel, moving_dapi_channel)
+                        start_step, end_step, fixed_dapi_channel, moving_dapi_channel)
 
-    # SLURM CLI overrides
+    if pick_steps:
+        cfg.start_step, cfg.end_step = _pick_steps_interactively()
+        print(f"\n  Submitting steps {cfg.start_step}–{cfg.end_step}:")
+        for n in range(cfg.start_step, cfg.end_step + 1):
+            print(f"    {n}  {STEPS[n]}")
+        print()
+
     if conda_env:
         cfg.slurm.conda_env = conda_env
     if partition:
@@ -198,7 +249,7 @@ def submit(
         f"export LD_LIBRARY_PATH={env_path}/lib:$LD_LIBRARY_PATH && "
         f"bash {PIPELINE_SCRIPT} "
         f'"{cfg.job_title}" "{cfg.fixed_file}" "{cfg.moving_file}" '
-        f'"{cfg.output_root}" {cfg.start_step}'
+        f'"{cfg.output_root}" {cfg.start_step} {cfg.end_step}'
     )
 
     cmd = [
@@ -219,7 +270,7 @@ def submit(
         print(" \\\n  ".join(cmd))
         return
 
-    logger.info(f"Submitting: {cfg.job_title} (start_step={cfg.start_step})")
+    logger.info(f"Submitting: {cfg.job_title} | steps {cfg.start_step}–{cfg.end_step}")
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         logger.error(f"sbatch failed:\n{result.stderr}")
@@ -231,8 +282,7 @@ def submit(
 def view(
     output_root: Path = typer.Option(..., "-o", "--output-root"),
     job_title: str = typer.Option(..., "-j", "--job-title"),
-    no_browser: bool = typer.Option(False, "--no-browser",
-        help="Write report but don't open browser."),
+    no_browser: bool = typer.Option(False, "--no-browser"),
 ):
     """Generate and open the QC HTML report for a completed run."""
     from segmentation_tools.view_results import generate_report
@@ -245,10 +295,15 @@ def view(
     print(f"Report: {report_path}")
 
 
+@app.command("steps")
+def steps():
+    """Print all pipeline steps and their numbers."""
+    _print_steps()
+
+
 @app.command("init-config")
 def init_config(
-    output: Optional[Path] = typer.Option(None, "--output", "-o",
-        help="Write config to this file instead of stdout."),
+    output: Optional[Path] = typer.Option(None, "--output", "-o"),
 ):
     """Print a sample config YAML to stdout or write to a file."""
     content = CONFIG_EXAMPLE.read_text()

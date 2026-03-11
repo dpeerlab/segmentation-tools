@@ -37,8 +37,9 @@ class RunConfig:
     mirage_learning_rate: Optional[float] = None
     mirage_num_steps: Optional[int] = None
 
-    # Resume
-    start_step: int = 0
+    # Step range
+    start_step: int = 1
+    end_step: int = 9
 
     # SLURM
     slurm: SlurmConfig = field(default_factory=SlurmConfig)
@@ -73,12 +74,12 @@ def load_config(config_path: Path) -> RunConfig:
     cfg.moving_dapi_channel = int(data.get("moving_dapi_channel", 1))
     cfg.cellpose_dapi_channel = int(data.get("cellpose_dapi_channel", 1))
     cfg.cellpose_membrane_channel = int(data.get("cellpose_membrane_channel", 0))
-
     cfg.mirage_batch_size = data.get("mirage_batch_size")
     cfg.mirage_learning_rate = data.get("mirage_learning_rate")
     cfg.mirage_num_steps = data.get("mirage_num_steps")
 
-    cfg.start_step = int(data.get("start_step", 0))
+    cfg.start_step = int(data.get("start_step", 1))
+    cfg.end_step = int(data.get("end_step", 9))
 
     slurm_data = data.get("slurm", {})
     cfg.slurm = SlurmConfig(

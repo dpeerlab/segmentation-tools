@@ -32,7 +32,7 @@ def get_shape_at_level(
     return shape
 
 
-@profile_step("005 Warp Image with SIFT")
+@profile_step("004 Apply Linear Transform to Moving DAPI")
 def main(moving_file_path, transform_file_path, checkpoint_dir, fixed_shape):
     with profile_block("Load moving image and transform"):
         moving_image = np.load(moving_file_path)

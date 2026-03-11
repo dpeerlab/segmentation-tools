@@ -143,19 +143,15 @@ start_step: 4
 
 | Step | Number |
 |------|--------|
-| Setup directories | `0` |
-| Convert to TIFF | `1` |
-| VALIS alignment | `4` |
+| Setup directories + convert to OME-TIFF | `1` |
+| VALIS rigid/affine alignment | `2` |
 | Preprocess high-res DAPI | `3` |
-| Warp moving DAPI | `5` |
-| Recommend MIRAGE parameters | `51` |
+| Apply linear transform to moving DAPI | `4` |
+| Recommend MIRAGE hyperparameters | `5` |
 | MIRAGE non-linear registration | `6` |
-| Evaluate MIRAGE alignment | `61` |
-| Warp all channels + pyramid | `7` |
-| CellPose segmentation | `8` |
-| SSIM quality checks | `10` |
-| Convert masks to GeoDataFrame | `11` |
-| Combine masks | `12` |
+| Evaluate MIRAGE alignment quality | `7` |
+| Warp all channels + build pyramid OME-TIFF | `8` |
+| CellPose segmentation + masks to parquet | `9` |
 
 ### Viewing results
 
