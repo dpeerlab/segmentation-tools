@@ -11,7 +11,6 @@ def parse_arguments():
     parser = argparse.ArgumentParser(
         description="Set up output directories for segmentation tools."
     )
-
     # Define the arguments as named flags
     parser.add_argument(
         "--output-root",

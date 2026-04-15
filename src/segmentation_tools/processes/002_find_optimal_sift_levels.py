@@ -42,29 +42,23 @@ def find_optimal_sift_level_by_keypoints(
 
     logger.info(f"Searching levels {max_possible_level} -> {min_level_search} for {k_min} <= K <= {k_max}")
 
-    # Iterate from a coarse level (highest index) down to Level 0
+
     for i in range(max_possible_level, min_level_search - 1, -1):
-        # Load the image data for this level
-        # Note: tifffile.TiffPage.asarray() loads the image into memory (NumPy)
         img_m_page = tif_m.series[0].levels[i]
         img_f_page = tif_f.series[0].levels[i]
 
-        # Read the image content as uint8 for SIFT
-        # Handle potential 3D (C, H, W) or 4D (Z, C, H, W) to get a 2D slice
+
         img_m = img_m_page.asarray().squeeze()
         img_f = img_f_page.asarray().squeeze()
 
-        # SIFT requires 8-bit image data
         if img_m.ndim > 2:
-            img_m = img_m[0]  # Take first channel/slice if multichannel
+            img_m = img_m[0]
         if img_f.ndim > 2:
             img_f = img_f[0]
 
         img_m = cv2.normalize(img_m, None, 0, 255, cv2.NORM_MINMAX).astype("uint8")
         img_f = cv2.normalize(img_f, None, 0, 255, cv2.NORM_MINMAX).astype("uint8")
 
-
-        # We only need the keypoint count, not the descriptors
         kp_m = sift.detect(img_m, None)
         kp_f = sift.detect(img_f, None)
 
